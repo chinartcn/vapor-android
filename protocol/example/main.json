@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "app_name": "Vapor Example",
+  "entry": "main.py",
+  "version": "1.0.0",
+  "width": 720,
+  "height": 1280,
+  "enable_python": true,
+  "theme": {
+    "background": "#101418",
+    "accent": "#3A7BD5"
+  },
+  "permissions": {
+    "filesystem": true,
+    "pip": true,
+    "extensions": true
+  }
+}

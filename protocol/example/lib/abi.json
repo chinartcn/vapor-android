@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "description": "扩展加载清单：kind=c 走 C ABI，kind=python 走内嵌解释器；arch 可限定 arm32/arm64/all",
+  "extensions": [
+    {
+      "name": "hello_c",
+      "kind": "c",
+      "path": "libhello_c.so",
+      "symbol": "vapor_ext_init",
+      "arch": "all",
+      "enabled": false
+    },
+    {
+      "name": "hello_py",
+      "kind": "python",
+      "path": "hello_py.py",
+      "arch": "all",
+      "enabled": false
+    }
+  ]
+}

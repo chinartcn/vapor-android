@@ -1,0 +1,12 @@
+[package]
+name = "vapor-renderer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "vapor"
+crate-type = ["cdylib"]
+
+[dependencies]
+vapor-core = { path = "../vapor-core" }

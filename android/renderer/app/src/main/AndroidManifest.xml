@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- app1 纯渲染器：NativeActivity 承载 Rust 的 libvapor.so。
+     空壳 APK 用占位包名/应用名，打包器会改写这些字段。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.vapor.shell"
+    android:versionCode="1"
+    android:versionName="1.0.0">
+
+    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="35" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:label="Vapor Shell"
+        android:hasCode="false"
+        android:hardwareAccelerated="true">
+        <activity
+            android:name="com.vapor.RendererActivity"
+            android:label="Vapor Shell"
+            android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- NativeActivity 需要的 meta：主 so 名 -->
+            <meta-data android:name="android.app.lib_name" android:value="vapor" />
+        </activity>
+    </application>
+</manifest>

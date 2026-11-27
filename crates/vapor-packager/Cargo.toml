@@ -1,0 +1,24 @@
+[package]
+name = "vapor-packager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "vapor_packager"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+vapor-core = { path = "../vapor-core" }
+serde.workspace = true
+serde_json.workspace = true
+zip.workspace = true
+log.workspace = true
+sha2 = "0.10"
+rsa = { version = "0.9", features = ["sha2"] }
+pkcs8 = { version = "0.10", features = ["pem"] }
+rand = "0.8"
+base64 = "0.22"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"

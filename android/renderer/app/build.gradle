@@ -1,0 +1,39 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.vapor'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.vapor.shell"
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName "1.0.0"
+    }
+
+    // 关键：同一个 APK 同时打包 arm32(armeabi-v7a) 与 arm64 的 libvapor.so
+    splits {
+        abi {
+            enable false
+            reset 'armeabi-v7a', 'arm64-v8a'
+            include 'armeabi-v7a', 'arm64-v8a'
+        }
+    }
+
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ['src/main/jniLibs']
+            assets.srcDirs = ['src/main/assets']
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    // 渲染器 app 尽量零依赖（NativeActivity）
+}

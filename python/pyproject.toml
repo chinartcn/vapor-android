@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vapor-runtime"
+version = "1.0.0"
+description = "Vapor 渲染器内置 Python 基础渲染 API（rust.Vapor）"
+authors = [{ name = "Vapor Project" }]
+requires-python = ">=3.11"
+
+[tool.setuptools]
+packages = ["rust"]
+
+[tool.setuptools.package-data]
+rust = ["*.pyi", "libvapor.so"]

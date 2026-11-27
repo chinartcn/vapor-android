@@ -1,0 +1,32 @@
+# Rust
+target/
+*.so
+*.dll
+*.dylib
+
+# 构建产物
+build/
+*.apk
+*.aab
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+python/build/
+python/dist/
+.pytest_cache/
+
+# 验证用的本机 JVM 宿主编译产物（源码保留，编译命令见 docs/JNI_BRIDGE.md）
+python/tests/libjni_host.so
+protocol/example/lib/*.so
+
+# 签名密钥（生产环境请勿提交真实密钥；此仓库仅含测试密钥）
+# packager_assets/*.pem
+
+# 编辑器 / 系统
+.DS_Store
+*.swp
+.vscode/
+.idea/
+EOF

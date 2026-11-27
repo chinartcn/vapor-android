@@ -1,0 +1,19 @@
+[package]
+name = "vapor-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+vapor-abi = { path = "../vapor-abi" }
+log.workspace = true
+libc.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+zip.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger.workspace = true
