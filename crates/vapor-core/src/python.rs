@@ -275,6 +275,31 @@ pub fn py_init(app_dir: *const c_char) -> i32 {
     if let Ok(mut s) = crate::state::state().lock() {
         s.python_ready = true;
     }
+
+    // 协议约定：启动后自动执行逻辑包入口 <app_dir>/main.py。
+    // 此前只初始化了 Python 环境却从未运行 main.py，导致帧缓冲始终为空（黑屏）。
+    // 用 try/except 包裹，逻辑脚本出错只打印、不阻断渲染器。
+    if !dir.is_empty() {
+        let main_py = format!("{}/main.py", dir.trim_end_matches('/'));
+        let boot_code = format!(
+            "import os,runpy,traceback\n\
+             _mp={main_py:?}\n\
+             if os.path.isfile(_mp):\n\
+             \x20   try:\n\
+             \x20       runpy.run_path(_mp, run_name='__main__')\n\
+             \x20       print('[vapor] main.py executed OK')\n\
+             \x20   except Exception:\n\
+             \x20       traceback.print_exc()\n\
+             \x20       print('[vapor] main.py FAILED')\n\
+             else:\n\
+             \x20   print('[vapor] no main.py at', _mp)"
+        );
+        let rc = py_eval_str(&boot_code);
+        crate::log::log_msg(
+            crate::log::LOG_INFO,
+            &format!("main.py 自动执行完成 rc={rc} path={main_py}"),
+        );
+    }
     VAPOR_OK
 }
 

@@ -187,6 +187,51 @@ def line(x0: int, y0: int, x1: int, y1: int, color: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 圆（纯整数 Bresenham 中点算法：不依赖 math / 浮点，arm32 也能用）
+# ---------------------------------------------------------------------------
+
+def circle(cx: int, cy: int, r: int, color: int) -> None:
+    """画空心圆轮廓（圆心 cx,cy，半径 r）。纯整数算法，无 math 依赖。"""
+    fb = _fb or _lock()
+    x, y, d = r, 0, 1 - r
+    while x >= y:
+        for px, py in ((x, y), (y, x), (-x, y), (-y, x),
+                       (x, -y), (y, -x), (-x, -y), (-y, -x)):
+            pixel(cx + px, cy + py, color)
+        y += 1
+        if d < 0:
+            d += 2 * y + 1
+        else:
+            x -= 1
+            d += 2 * (y - x) + 1
+
+
+def disc(cx: int, cy: int, r: int, color: int) -> None:
+    """画实心圆（圆心 cx,cy，半径 r）。纯整数扫描线填充，无 math 依赖。"""
+    fb = _fb or _lock()
+    x, y, d = r, 0, 1 - r
+    while x >= y:
+        rect(cx - x, cy + y, 2 * x + 1, 1, color)
+        rect(cx - x, cy - y, 2 * x + 1, 1, color)
+        rect(cx - y, cy + x, 2 * y + 1, 1, color)
+        rect(cx - y, cy - x, 2 * y + 1, 1, color)
+        y += 1
+        if d < 0:
+            d += 2 * y + 1
+        else:
+            x -= 1
+            d += 2 * (y - x) + 1
+
+
+def square_outline(x: int, y: int, s: int, color: int, thickness: int = 1) -> None:
+    """画空心正方形（左上角 x,y，边长 s，线宽 thickness）。"""
+    rect(x, y, s, thickness, color)
+    rect(x, y + s - thickness, s, thickness, color)
+    rect(x, y, thickness, s, color)
+    rect(x + s - thickness, y, thickness, s, color)
+
+
+# ---------------------------------------------------------------------------
 # 基础文本（内置 5x7 点阵，无字体依赖；扩展可覆盖）
 # ---------------------------------------------------------------------------
 
@@ -255,6 +300,7 @@ from . import jni                 # noqa: E402  —— JNI 桥接：C/Python 扩
 __all__ = [
     "rgb", "abi_version", "cpython_version", "init", "shutdown", "size", "resize",
     "framebuffer", "present", "clear", "pixel", "rect", "hline", "vline", "line",
+    "circle", "disc", "square_outline",
     "text", "poll_event", "event_count", "set_title", "fs", "ext", "pip", "ui", "jni",
     "EVT_NONE", "EVT_MOTION", "EVT_BUTTON", "EVT_KEY", "EVT_RESIZE",
     "EVT_RESUME", "EVT_PAUSE", "EVT_DESTROY",
