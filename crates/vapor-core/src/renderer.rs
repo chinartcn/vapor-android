@@ -145,12 +145,24 @@ mod gles {
                 glEnableVertexAttribArray(1);
                 glVertexAttribPointer(1, 2, GL_FLOAT, 0, 16, 8usize as *const _);
 
+                // 初始化在主线程完成；主动解绑，让渲染线程独占该 context，
+                // 避免同一 context 绑到两个线程导致后续线程 makeCurrent 行为异常。
+                eglMakeCurrent(display, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
+
                 GlState { display, surface, context, texture: tex, program: prog, vbo, tex_w: 0, tex_h: 0 }
             }
         }
 
         pub fn draw(&mut self, pixels: &[u8], w: i32, h: i32) {
             unsafe {
+                // 关键修复：EGL 上下文是「线程本地」的。init_from_window 在 surfaceCreated
+                // 回调（主线程）里创建上下文并 eglMakeCurrent，但 present() 在独立的
+                // RenderThread 里调用本方法。渲染线程从未 makeCurrent，eglSwapBuffers 时
+                // 当前线程没有绑定 surface，导致每帧 EGL_BAD_SURFACE (0x300D)、画面黑屏。
+                // 因此在渲染线程每帧先绑定上下文（同一 context 重复 makeCurrent 开销极小）。
+                if eglMakeCurrent(self.display, self.surface, self.surface, self.context) == 0 {
+                    return; // 绑定失败（surface 已销毁），跳过本帧，避免刷屏
+                }
                 glViewport(0, 0, w, h);
                 glClearColor(0.05, 0.06, 0.08, 1.0);
                 glClear(GL_COLOR_BUFFER_BIT);
