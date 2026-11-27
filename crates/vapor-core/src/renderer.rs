@@ -10,10 +10,13 @@ use crate::log::{log_msg, LOG_INFO};
 #[cfg(target_os = "android")]
 mod gles {
     use std::ffi::c_void;
+    use crate::log::{log_msg, LOG_INFO};
 
     pub type EGLDisplay = *mut c_void;
     pub type EGLSurface = *mut c_void;
     pub type EGLContext = *mut c_void;
+
+    static SWAP_ERR_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
     #[link(name = "EGL")]
     extern "C" {
@@ -24,6 +27,7 @@ mod gles {
         pub fn eglCreateContext(d: EGLDisplay, cfg: EGLDisplay, share: EGLContext, attrs: *const i32) -> EGLContext;
         pub fn eglMakeCurrent(d: EGLDisplay, draw: EGLSurface, read: EGLSurface, ctx: EGLContext) -> i32;
         pub fn eglSwapBuffers(d: EGLDisplay, s: EGLSurface) -> i32;
+        pub fn eglGetError() -> i32;
     }
 
     #[link(name = "GLESv2")]
@@ -70,6 +74,18 @@ mod gles {
     pub const GL_VERTEX_SHADER: u32 = 0x8B31;
     pub const GL_FRAGMENT_SHADER: u32 = 0x8B30;
     pub const EGL_OPENGL_ES3_BIT: i32 = 0x00000040;
+    // EGL 属性 key（此前把 EGL_SURFACE_TYPE=0x3033 误当成 EGL_RENDERABLE_TYPE，
+    // 导致 eglChooseConfig 选不到支持 window 的 config，surface 一直为 null）。
+    pub const EGL_RENDERABLE_TYPE: i32 = 0x3040;
+    pub const EGL_SURFACE_TYPE: i32 = 0x3033;
+    pub const EGL_WINDOW_BIT: i32 = 0x0004;
+    pub const EGL_RED_SIZE: i32 = 0x3024;
+    pub const EGL_GREEN_SIZE: i32 = 0x3023;
+    pub const EGL_BLUE_SIZE: i32 = 0x3022;
+    pub const EGL_ALPHA_SIZE: i32 = 0x3021;
+    pub const EGL_NONE: i32 = 0x3038;
+    pub const EGL_CONTEXT_CLIENT_VERSION: i32 = 0x3098;
+    pub const EGL_SUCCESS: i32 = 0x3000;
 
     pub struct GlState {
         pub display: EGLDisplay,
@@ -155,13 +171,16 @@ mod gles {
 
         pub fn draw(&mut self, pixels: &[u8], w: i32, h: i32) {
             unsafe {
-                // 关键修复：EGL 上下文是「线程本地」的。init_from_window 在 surfaceCreated
-                // 回调（主线程）里创建上下文并 eglMakeCurrent，但 present() 在独立的
-                // RenderThread 里调用本方法。渲染线程从未 makeCurrent，eglSwapBuffers 时
-                // 当前线程没有绑定 surface，导致每帧 EGL_BAD_SURFACE (0x300D)、画面黑屏。
-                // 因此在渲染线程每帧先绑定上下文（同一 context 重复 makeCurrent 开销极小）。
+                // surface/context/display 必须全部有效。此前 config 属性错误导致 surface
+                // 一直为 null，eglMakeCurrent(d, null, null, ctx) 在部分驱动上仍返回 1
+                // （surfaceless 绑定），随后 eglSwapBuffers(d, null) 每帧报 EGL_BAD_SURFACE。
+                if self.display.is_null() || self.surface.is_null() || self.context.is_null() {
+                    return;
+                }
+                // EGL 上下文是「线程本地」的：init 在 surfaceCreated 回调（主线程）里完成，
+                // present() 在独立 RenderThread。渲染线程每帧先绑定上下文（开销极小）。
                 if eglMakeCurrent(self.display, self.surface, self.surface, self.context) == 0 {
-                    return; // 绑定失败（surface 已销毁），跳过本帧，避免刷屏
+                    return; // 绑定失败（surface 已销毁），跳过本帧
                 }
                 glViewport(0, 0, w, h);
                 glClearColor(0.05, 0.06, 0.08, 1.0);
@@ -176,7 +195,15 @@ mod gles {
                 }
                 glUseProgram(self.program);
                 glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-                eglSwapBuffers(self.display, self.surface);
+                if eglSwapBuffers(self.display, self.surface) == 0 {
+                    // 限流：只在首次失败记日志，避免每帧刷屏淹没其他信息。
+                    if !SWAP_ERR_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        log_msg(LOG_INFO, &format!(
+                            "eglSwapBuffers 失败 err=0x{:x} surf={:p}",
+                            eglGetError(), self.surface
+                        ));
+                    }
+                }
             }
         }
     }
@@ -190,17 +217,50 @@ pub fn init_from_window(window: *mut std::ffi::c_void) {
         let d = eglGetDisplay(0);
         let mut maj = 0;
         let mut min = 0;
-        eglInitialize(d, &mut maj, &mut min);
+        if eglInitialize(d, &mut maj, &mut min) == 0 {
+            log_msg(LOG_INFO, &format!("EGL eglInitialize 失败 err=0x{:x}", eglGetError()));
+            return;
+        }
+
+        // 关键修复：正确区分 EGL_RENDERABLE_TYPE(0x3040) 与 EGL_SURFACE_TYPE(0x3033)。
+        // 旧代码用 0x3033 + EGL_OPENGL_ES3_BIT(0x40) 作为唯一属性，等于请求一个
+        // 值为 0x40 的 surface type（非法），eglChooseConfig 选不到 window config，
+        // 后续 eglCreateWindowSurface 返回 EGL_NO_SURFACE → 黑屏 + EGL_BAD_SURFACE。
         let attrs = [
-            0x3033, EGL_OPENGL_ES3_BIT, // EGL_RENDERABLE_TYPE
-            0x3024, 8, 0x3023, 8, 0x3022, 8, 0x3021, 8, 0x3038,
+            EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+            EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+            EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+            EGL_NONE,
         ];
         let mut cfg: EGLDisplay = std::ptr::null_mut();
         let mut n = 0;
-        eglChooseConfig(d, attrs.as_ptr(), &mut cfg, 1, &mut n);
+        if eglChooseConfig(d, attrs.as_ptr(), &mut cfg, 1, &mut n) == 0 || n < 1 || cfg.is_null() {
+            log_msg(LOG_INFO, &format!("EGL eglChooseConfig 失败 n={n} err=0x{:x}", eglGetError()));
+            return;
+        }
+
         let surf = eglCreateWindowSurface(d, cfg, window, std::ptr::null());
-        let ctx_attrs = [0x3098, 3, 0x3038]; // EGL_CONTEXT_CLIENT_VERSION=3
-        let ctx = eglCreateContext(d, cfg, std::ptr::null_mut(), ctx_attrs.as_ptr());
+        if surf.is_null() {
+            log_msg(LOG_INFO, &format!("EGL eglCreateWindowSurface 失败 err=0x{:x}", eglGetError()));
+            return;
+        }
+        let ctx_attrs = [EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE];
+        let mut ctx = eglCreateContext(d, cfg, std::ptr::null_mut(), ctx_attrs.as_ptr());
+        if ctx.is_null() {
+            // ES3 上下文创建失败，回退 ES2（部分老驱动只支持 ES2）。
+            let ctx_attrs2 = [EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE];
+            ctx = eglCreateContext(d, cfg, std::ptr::null_mut(), ctx_attrs2.as_ptr());
+            log_msg(LOG_INFO, "EGL ES3 context 失败，回退 ES2");
+        }
+        if ctx.is_null() {
+            log_msg(LOG_INFO, &format!("EGL eglCreateContext 失败 err=0x{:x}", eglGetError()));
+            return;
+        }
+        // 诊断：确认 surface/context/display 均有效后再初始化 GL 资源。
+        log_msg(LOG_INFO, &format!(
+            "EGL 就绪 d={:p} surf={:p} ctx={:p} es={}x{}",
+            d, surf, ctx, maj, min
+        ));
         let gl = GlState::new(d, surf, ctx);
         GL_STATE.lock().unwrap().replace(gl);
     }
