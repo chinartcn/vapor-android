@@ -6,8 +6,24 @@
 //!
 //! 本模块只绑定最小必要 API：初始化、运行文件、eval、GIL、导入。
 //! 复杂的 Python 逻辑都放在 `rust.Vapor` 包里（纯 Python），便于用扩展迭代。
+//!
+//! # 初始化方式（重要）
+//!
+//! CPython 3.11 起 `Py_SetPath` 被弃用，3.13 起从公开 API 移除（仅 stable ABI 保留），
+//! 且其真实签名是 `void Py_SetPath(const wchar_t *)` —— 传入单字节 UTF-8 字符串会被
+//! `wcsdup` 按 4 字节宽字符解读，导致 sys.path 乱码、找不到 `encodings`，最终
+//! `Py_InitializeEx` 内部 `Py_ExitStatusException` → `Py_FatalError` → 整个进程 exit()。
+//!
+//! 因此这里改用 CPython 3.15 官方推荐的 **PyConfig** 初始化：
+//!   - `PyConfig_InitPythonConfig` 初始化一个（对我们不透明的）PyConfig 缓冲区；
+//!   - 通过 `PYTHONPATH` 环境变量注入 stdlib / rust 包 / app 路径（UTF-8，无 wchar_t 转换）；
+//!   - `Py_InitializeFromConfig` 返回 `PyStatus`，可检查错误而不触发 fatal exit；
+//!   - `PyConfig_Clear` 释放内部资源。
+//!
+//! PyConfig 结构体布局随版本变化，我们从不读写其字段，只把一段足够大的对齐缓冲区
+//! 交给 CPython 自己的 API 初始化/清理，因此不依赖任何内部字段偏移，跨版本安全。
 
-use std::ffi::{c_char, c_int, c_void, CString};
+use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::os::raw::c_uint;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::Mutex;
@@ -22,10 +38,39 @@ type PyGILStateReleaseFn = unsafe extern "C" fn(c_int);
 type PyRunSimpleStringFn = unsafe extern "C" fn(*const c_char) -> c_int;
 type PyRunFileFn = unsafe extern "C" fn(*const c_char, *const c_char) -> *mut c_void;
 type PyErrPrintFn = unsafe extern "C" fn();
-type PySetPathFn = unsafe extern "C" fn(*const c_char) -> c_int;
+
+// PyConfig 初始化三件套（PyConfig 对我们是不透明缓冲区）。
+type PyConfigInitFn = unsafe extern "C" fn(*mut c_void);
+type PyConfigClearFn = unsafe extern "C" fn(*mut c_void);
+type PyInitializeFromConfigFn = unsafe extern "C" fn(*const c_void) -> PyStatus;
+type PyStatusExceptionFn = unsafe extern "C" fn(PyStatus) -> c_int;
+
+/// CPython `PyStatus` 的 ABI 镜像（Include/cpython/initconfig.h）：
+/// ```c
+/// typedef struct {
+///     enum { _PyStatus_TYPE_OK=0, _PyStatus_TYPE_ERROR=1, _PyStatus_TYPE_EXIT=2 } _type;
+///     const char *func;
+///     const char *err_msg;
+///     int exitcode;
+/// } PyStatus;
+/// ```
+/// 用 repr(C) 保证按值传递/返回遵循平台 C ABI（x86_64/arm64 sret、arm32 寄存器）。
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PyStatus {
+    _type: c_int,
+    func: *const c_char,
+    err_msg: *const c_char,
+    exitcode: c_int,
+}
+
+/// PyConfig 对我们不透明。分配远大于其实际大小的对齐缓冲区（任何合理版本
+/// 的 PyConfig 都远小于 4096 字节），只把指针交给 CPython 自己的 API。
+#[repr(C, align(16))]
+struct PyConfigBuf([u8; 4096]);
 
 struct PyApi {
-    initialize: PyInitializeExFn,
+    initialize: PyInitializeExFn, // 降级用：Py_InitializeEx(0)
     finalize: PyFinalizeExFn,
     gil_ensure: PyGILStateEnsureFn,
     gil_release: PyGILStateReleaseFn,
@@ -33,7 +78,11 @@ struct PyApi {
     #[allow(dead_code)] // 保留 FILE* 入口，未来可切换 off runpy 方案
     run_file: PyRunFileFn,
     err_print: PyErrPrintFn,
-    set_path: Option<PySetPathFn>,
+    // PyConfig 路径（3.15 首选）
+    config_init: Option<PyConfigInitFn>,
+    config_clear: Option<PyConfigClearFn>,
+    initialize_from_config: Option<PyInitializeFromConfigFn>,
+    status_exception: Option<PyStatusExceptionFn>,
 }
 
 static PY_HANDLE: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
@@ -72,7 +121,7 @@ fn load_python() -> Result<*mut c_void, ()> {
     Err(())
 }
 
-/// 初始化解释器（Py_InitializeEx(0)：不注册信号处理器，避免抢占 NativeActivity 的信号）。
+/// 初始化解释器。
 pub fn py_init(app_dir: *const c_char) -> i32 {
     if PY_READY.load(Ordering::Acquire) {
         return VAPOR_OK;
@@ -113,12 +162,15 @@ pub fn py_init(app_dir: *const c_char) -> i32 {
             run_string: sym!("PyRun_SimpleString"),
             run_file: sym!("PyRun_SimpleFileExFlags"),
             err_print: sym!("PyErr_Print"),
-            set_path: resolve(handle, "Py_SetPath").ok(),
+            config_init: resolve(handle, "PyConfig_InitPythonConfig").ok(),
+            config_clear: resolve(handle, "PyConfig_Clear").ok(),
+            initialize_from_config: resolve(handle, "Py_InitializeFromConfig").ok(),
+            status_exception: resolve(handle, "PyStatus_Exception").ok(),
         };
         *PY_API.lock().unwrap() = Some(api);
     }
 
-    // 注入 sys.path：内置 rust.Vapor 包目录 + 逻辑包根目录 + lib/ 目录。
+    // 注入模块搜索路径：内置 rust.Vapor 包目录 + stdlib + lib-dynload + 逻辑包根 + lib/。
     let dir = if app_dir.is_null() {
         String::new()
     } else {
@@ -129,11 +181,11 @@ pub fn py_init(app_dir: *const c_char) -> i32 {
     let builtin = bundled_python_home();
     let mut paths: Vec<String> = Vec::new();
     if !builtin.is_empty() {
-        // stdlib 必须显式加入：Py_SetPath 会替换整个默认 sys.path。
+        // stdlib 必须显式加入：PYTHONPATH 会被前置到 sys.path。
         paths.push(format!("{builtin}/stdlib"));
         paths.push(format!("{builtin}/stdlib/lib-dynload_arm64"));
         paths.push(format!("{builtin}/stdlib/lib-dynload_arm32"));
-        paths.push(builtin.clone());           // rust.Vapor 包所在目录
+        paths.push(builtin.clone()); // rust.Vapor 包所在目录
         paths.push(format!("{builtin}/site-packages"));
     }
     if !dir.is_empty() {
@@ -142,21 +194,65 @@ pub fn py_init(app_dir: *const c_char) -> i32 {
     }
     let syspath = paths.join(":");
 
-    unsafe {
+    // 关键修复：用 PYTHONPATH（UTF-8，无需 wchar_t 转换）注入路径。
+    // PyConfig_InitPythonConfig 的 use_environment=1，会读取 PYTHONPATH 并前置到 sys.path。
+    // 绝不再调用 Py_SetPath（其 const wchar_t* 签名与单字节 UTF-8 不兼容，会令 sys.path 乱码）。
+    if !syspath.is_empty() {
+        let key = CString::new("PYTHONPATH").unwrap_or_default();
+        let val = CString::new(syspath.as_str()).unwrap_or_default();
+        unsafe {
+            libc::setenv(key.as_ptr(), val.as_ptr(), 1);
+        }
+        crate::log::log_msg(
+            crate::log::LOG_INFO,
+            &format!("PYTHONPATH 已注入 {} 条路径", paths.len()),
+        );
+    }
+
+    // 用 PyConfig 初始化；返回 PyStatus 可检查失败，避免 fatal exit 杀死渲染器进程。
+    let api_guard = PY_API.lock().unwrap();
+    let api = api_guard.as_ref().unwrap();
+    if let (Some(config_init), Some(config_clear), Some(initialize_from_config), Some(status_exception)) =
+        (api.config_init, api.config_clear, api.initialize_from_config, api.status_exception)
+    {
+        let mut buf = PyConfigBuf([0u8; 4096]);
+        let cfg_ptr = buf.0.as_mut_ptr() as *mut c_void;
+        unsafe {
+            config_init(cfg_ptr);
+            let status = initialize_from_config(cfg_ptr as *const c_void);
+            config_clear(cfg_ptr);
+            if status_exception(status) != 0 {
+                let detail = if status.err_msg.is_null() {
+                    format!("type={}", status._type)
+                } else {
+                    CStr::from_ptr(status.err_msg).to_string_lossy().into_owned()
+                };
+                crate::log::log_msg(
+                    crate::log::LOG_ERROR,
+                    &format!("CPython 初始化失败（已拦截，不退出进程）: {detail}"),
+                );
+                return VAPOR_ERR_STATE;
+            }
+        }
+        crate::log::log_msg(crate::log::LOG_INFO, "CPython 经 PyConfig 初始化成功");
+    } else {
+        // 降级：极少数精简版 libpython 无 PyConfig 符号，退回 Py_InitializeEx(0)。
+        // 路径已通过 PYTHONPATH 注入，compat config 会读取，仍不会乱码。
+        unsafe { (api.initialize)(0) };
+        crate::log::log_msg(crate::log::LOG_WARN, "PyConfig 符号缺失，降级 Py_InitializeEx(0)");
+    }
+    drop(api_guard);
+
+    // 启动引导：设置 argv、禁止写 pyc、打印版本。
+    {
         let api = PY_API.lock().unwrap();
         if let Some(a) = api.as_ref() {
-            // Py_SetPath 必须在 Py_Initialize 之前调用才生效。
-            if let Some(sp) = a.set_path {
-                let p = CString::new(syspath.as_str()).unwrap_or_default();
-                (sp)(p.as_ptr());
-            }
-            (a.initialize)(0);
             let boot = format!(
                 "import sys; sys.argv=['main.py']; sys.dont_write_bytecode=True; print('[vapor] python {} ready', sys.version.split()[0])",
                 vapor_abi::VAPOR_CPYTHON_VERSION
             );
             let c = CString::new(boot).unwrap_or_default();
-            (a.run_string)(c.as_ptr());
+            unsafe { (a.run_string)(c.as_ptr()) };
         }
     }
 
@@ -188,9 +284,7 @@ pub fn py_run_file(path: *const c_char) -> i32 {
     }
     let p = unsafe { std::ffi::CStr::from_ptr(path) }.to_string_lossy().into_owned();
     // PyRun_SimpleFileExFlags 需要 FILE*，这里用等价的 exec() 方式，避免 libc FILE 布局差异。
-    let code = format!(
-        "import runpy; runpy.run_path({p:?}, run_name='__main__')"
-    );
+    let code = format!("import runpy; runpy.run_path({p:?}, run_name='__main__')");
     py_eval_str(&code)
 }
 
