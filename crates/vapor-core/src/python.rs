@@ -129,8 +129,12 @@ pub fn py_init(app_dir: *const c_char) -> i32 {
     let builtin = bundled_python_home();
     let mut paths: Vec<String> = Vec::new();
     if !builtin.is_empty() {
-        paths.push(builtin.clone());
-        paths.push(format!("{builtin}/lib/python3.15/site-packages"));
+        // stdlib 必须显式加入：Py_SetPath 会替换整个默认 sys.path。
+        paths.push(format!("{builtin}/stdlib"));
+        paths.push(format!("{builtin}/stdlib/lib-dynload_arm64"));
+        paths.push(format!("{builtin}/stdlib/lib-dynload_arm32"));
+        paths.push(builtin.clone());           // rust.Vapor 包所在目录
+        paths.push(format!("{builtin}/site-packages"));
     }
     if !dir.is_empty() {
         paths.push(dir.clone());
@@ -141,11 +145,12 @@ pub fn py_init(app_dir: *const c_char) -> i32 {
     unsafe {
         let api = PY_API.lock().unwrap();
         if let Some(a) = api.as_ref() {
-            (a.initialize)(0);
+            // Py_SetPath 必须在 Py_Initialize 之前调用才生效。
             if let Some(sp) = a.set_path {
                 let p = CString::new(syspath.as_str()).unwrap_or_default();
                 (sp)(p.as_ptr());
             }
+            (a.initialize)(0);
             let boot = format!(
                 "import sys; sys.argv=['main.py']; sys.dont_write_bytecode=True; print('[vapor] python {} ready', sys.version.split()[0])",
                 vapor_abi::VAPOR_CPYTHON_VERSION

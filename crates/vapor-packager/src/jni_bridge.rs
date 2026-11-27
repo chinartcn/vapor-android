@@ -48,25 +48,32 @@ fn inner(
     shell_package: jstring,
     shell_app_name: jstring,
 ) -> Result<Vec<u8>, String> {
-    let to_vec = |arr: jbyteArray| -> Result<Vec<u8>, String> {
-        let b = JByteArray::from_raw(arr);
+    // 用普通函数而非闭包，避免 &mut env 被多个闭包同时捕获导致借用冲突。
+    fn to_vec(env: &mut JNIEnv, arr: jbyteArray) -> Result<Vec<u8>, String> {
+        if arr.is_null() {
+            return Ok(Vec::new());
+        }
+        let b = unsafe { JByteArray::from_raw(arr) };
         env.convert_byte_array(b).map_err(|e| e.to_string())
-    };
-    let to_str = |s: jstring| -> Result<String, String> {
-        let js = JString::from_raw(s);
+    }
+    fn to_str(env: &mut JNIEnv, j: jstring) -> Result<String, String> {
+        if j.is_null() {
+            return Ok(String::new());
+        }
+        let js = unsafe { JString::from_raw(j) };
         env.get_string(&js).map(|x| x.into()).map_err(|e| e.to_string())
-    };
+    }
 
-    let shell_bytes = to_vec(shell)?;
-    let logic_bytes = to_vec(logic)?;
-    let icon_bytes = if icon.is_null() { None } else { Some(to_vec(icon)?) };
+    let shell_bytes = to_vec(env, shell)?;
+    let logic_bytes = to_vec(env, logic)?;
+    let icon_bytes = if icon.is_null() { None } else { Some(to_vec(env, icon)?) };
     let opts = PackageOptions {
-        app_name: to_str(app_name)?,
-        version_name: to_str(version_name)?,
+        app_name: to_str(env, app_name)?,
+        version_name: to_str(env, version_name)?,
         version_code: version_code as u32,
-        package_name: to_str(package_name)?,
-        shell_package_name: to_str(shell_package)?,
-        shell_app_name: to_str(shell_app_name)?,
+        package_name: to_str(env, package_name)?,
+        shell_package_name: to_str(env, shell_package)?,
+        shell_app_name: to_str(env, shell_app_name)?,
         icon_png: icon_bytes,
         key_alias: "vapor".into(),
     };

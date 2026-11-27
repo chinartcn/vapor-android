@@ -13,7 +13,7 @@
 
     <application
         android:label="Vapor Shell"
-        android:hasCode="false"
+        android:hasCode="true"
         android:hardwareAccelerated="true">
         <activity
             android:name="com.vapor.RendererActivity"

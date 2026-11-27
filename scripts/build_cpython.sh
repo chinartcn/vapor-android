@@ -96,6 +96,25 @@ build_arm32() {
   fi
   local d="$OUT/arm32"; mkdir -p "$d"
 
+  # 交叉编译 CPython 需要一个与目标**同版本**的宿主解释器来生成 .pyc 与配置头。
+  # BUILD_PYTHON 可由调用方指定；默认探测 build/host-python/install/bin/python3.15。
+  local BUILD_PYTHON="${BUILD_PYTHON:-}"
+  if [ -z "$BUILD_PYTHON" ] && [ -x "$ROOT/build/host-python/install/bin/python3.15" ]; then
+    BUILD_PYTHON="$ROOT/build/host-python/install/bin/python3.15"
+  fi
+  if [ -z "$BUILD_PYTHON" ]; then
+    echo "[FATAL] arm32 交叉编译需要同版本($PYTHON_VERSION)宿主 Python。" >&2
+    echo "        请先构建 build/host-python 或设置 BUILD_PYTHON=<python3.15 路径>" >&2
+    exit 1
+  fi
+  local bp_ver
+  bp_ver="$("$BUILD_PYTHON" -c 'import sys;print("%d.%d.%d"%sys.version_info[:3])')"
+  if [ "$bp_ver" != "$PYTHON_VERSION" ]; then
+    echo "[FATAL] 宿主 Python 版本 $bp_ver != $PYTHON_VERSION，禁止版本错配" >&2
+    exit 1
+  fi
+  echo "[info] build-python = $BUILD_PYTHON ($bp_ver)"
+
   local TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
   local HOST="armv7a-linux-androideabi24"
   export CC="$TOOLCHAIN/$HOST-clang"
@@ -107,26 +126,70 @@ build_arm32() {
   export LDFLAGS="--sysroot=$SYSROOT"
 
   cd "$s"
-  # 首次交叉编译配置；Android 无 ncurses/readline/sqlite 系统库，禁用可选模块，
-  # 但保留 zlib + 内置 sqlite3（CPython 自带）以支持 pip。
-  if [ ! -f Makefile ]; then
-    ./configure \
-      --host=arm-linux-androideabi \
-      --build=x86_64-pc-linux-gnu \
-      --target=arm-linux-androideabi \
-      --prefix="$d" \
-      --disable-shared --enable-static \
-      --without-ensurepip \
-      --with-build-python=python3 \
-      ac_cv_file__dev_ptmx=no \
-      ac_cv_file__dev_ptc=no \
-      ac_cv_func_getentropy=no \
-      ac_cv_func_sigaltstack=no
+  # 每次都用正确的 Android 探测结果重新 configure（幂等，避免旧 Makefile 残留宿主库探测）。
+  if [ -f Makefile ]; then
+    make distclean >/dev/null 2>&1 || true
   fi
-  make -j"$(nproc)" python
-  # 生成静态库 libpython3.15.a，Rust 侧静态链接
+  rm -f config.cache config.status Makefile pyconfig.h .crosstarget_configured
+  # 关键：显式告诉 configure Android sysroot 没有这些头文件/库，防止误用宿主的。
+  ./configure \
+    --host=arm-linux-androideabi \
+    --build=x86_64-pc-linux-gnu \
+    --target=arm-linux-androideabi \
+    --prefix="$d" \
+    --enable-shared --disable-static \
+    --without-ensurepip \
+    --with-build-python="$BUILD_PYTHON" \
+    ac_cv_file__dev_ptmx=no \
+    ac_cv_file__dev_ptc=no \
+    ac_cv_func_getentropy=no \
+    ac_cv_func_sigaltstack=no \
+    ac_cv_header_lzma_h=no \
+    ac_cv_header_zstd_h=no \
+    ac_cv_header_bzlib_h=no \
+    ac_cv_header_readline_readline_h=no \
+    ac_cv_header_ncurses_h=no \
+    ac_cv_lib_lzma_lzma_easy_buffer_encode=no \
+    ac_cv_lib_zstd_ZSTD_version=no \
+    ac_cv_lib_bz2_BZ2_bzCompressInit=no \
+    LIBZSTD_CFLAGS="" LIBZSTD_LIBS="" \
+    LIBLZMA_CFLAGS="" LIBLZMA_LIBS=""
+  echo "$BUILD_PYTHON" > .crosstarget_configured
+  # CROSSTARGET_CONFIGURED 标记供上面判断（把值写入环境以便重复调用）
+  export CROSSTARGET_CONFIGURED="$(cat .crosstarget_configured 2>/dev/null || echo "$BUILD_PYTHON")"
+
+  # Android NDK sysroot 无 zstd 头/库；configure 误探到宿主的 libzstd。
+  # 从构建列表移除 _remote_debugging / _zstd 两个非必需模块，避免 -DHAVE_ZSTD 与 zstd.h 依赖。
+  # （核心解释器 + zlib + sqlite3 + ctypes 均保留，pip 与 rust.Vapor 不受影响）
+  python3 - "$PWD/Makefile" <<'PYEOF'
+import sys, re
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+# Android NDK sysroot 缺少 host 探测到的 zstd/lzma 开发库。CPython 3.15 把
+# _lzma/_zstd/_remote_debugging 变成默认构建的内置模块，configure 缓存变量无法关闭。
+# 直接从 Makefile 的模块列表变量中移除对应的完整条目。
+drop = ["_remote_debugging", "_zstd", "_lzma", "readline"]
+for var in ["SHAREDMODS", "MODBUILT_NAMES", "MODSHARED_NAMES"]:
+    m = re.search(rf"^{var}= (.*)$", s, flags=re.M)
+    if not m:
+        continue
+    line = m.group(0)
+    toks = m.group(1).split()
+    kept = [t for t in toks if not any(d in t for d in drop)]
+    s = s.replace(line, f"{var}= " + " ".join(kept))
+# 把这些模块的 STATE 设为 no，确保即使被依赖也不构建
+for d in drop:
+    s = re.sub(rf"^MODULE__{d.upper()}_STATE=.*$", f"MODULE__{d.upper()}_STATE=no", s, flags=re.M)
+    s = re.sub(rf"^MODULE__{d.upper()}_CFLAGS=.*$", f"MODULE__{d.upper()}_CFLAGS=", s, flags=re.M)
+    s = re.sub(rf"^MODULE__{d.upper()}_LDFLAGS=.*$", f"MODULE__{d.upper()}_LDFLAGS=", s, flags=re.M)
+open(p, "w", encoding="utf-8").write(s)
+left = [d for d in drop if f"Modules/{d}$(EXT_SUFFIX)" in s]
+print("[patch] Makefile: 已移除 _remote_debugging / _zstd / _lzma；SHAREDMODS 残余:", left)
+PYEOF
+  make -j"$(nproc)"
+  # 动态库（Rust 侧通过 dlsym 加载，必须有 .so）
+  cp -f libpython$PYTHON_MAJOR_MINOR.so* "$d/" 2>/dev/null || true
   cp -f libpython$PYTHON_MAJOR_MINOR.a "$d/" 2>/dev/null || true
-  cp -f libpython$PYTHON_MAJOR_MINOR.so "$d/" 2>/dev/null || true
   # 标准库（pip 需要）
   mkdir -p "$d/lib/python$PYTHON_MAJOR_MINOR"
   cp -r Lib/. "$d/lib/python$PYTHON_MAJOR_MINOR/"

@@ -30,3 +30,7 @@ protocol/example/lib/*.so
 .vscode/
 .idea/
 EOF
+
+# APK 构建时由 build_all.sh / assemble 脚本生成的 assets（CPython stdlib、内置包、示例逻辑）
+android/renderer/app/src/main/assets/python/
+android/renderer/app/src/main/assets/app/

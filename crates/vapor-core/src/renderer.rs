@@ -81,6 +81,8 @@ mod gles {
         pub tex_w: i32,
         pub tex_h: i32,
     }
+    // EGL 句柄是进程级不透明指针；GL_STATE 只在渲染线程访问，Mutex 已保证互斥。
+    unsafe impl Send for GlState {}
 
     const VS: &str = "#version 300 es\n\
         in vec2 aPos;\n\

@@ -51,11 +51,16 @@ cargo ndk -t arm64-v8a -t armeabi-v7a -o "$BUILD/jniLibs/packager" \
     -p vapor-packager build --release
 
 echo "========== [4/6] 把 CPython 运行库注入 jniLibs =========="
+# arm64 官方包: libpython3.15.so 在 prefix/lib/ ; arm32 源码编译: 在输出根目录
 for arch in arm64 arm32; do
-  jni="$BUILD/jniLibs/renderer/$([ "$arch" = arm64 ] && echo arm64-v8a || echo armeabi-v7a)"
+  case "$arch" in
+    arm64) jni="$BUILD/jniLibs/renderer/arm64-v8a"; src="$BUILD/cpython/arm64/prefix/lib" ;;
+    arm32) jni="$BUILD/jniLibs/renderer/armeabi-v7a"; src="$BUILD/cpython/arm32" ;;
+  esac
   mkdir -p "$jni"
-  cp -f "$BUILD/cpython/$arch"/*.so "$jni/" 2>/dev/null || true
-  cp -f "$BUILD/cpython/$arch"/libpython*.a "$jni/" 2>/dev/null || true
+  if [ -d "$src" ]; then
+    find "$src" -maxdepth 1 -name 'libpython*.so' -exec cp -f {} "$jni/" \; 2>/dev/null || true
+  fi
 done
 cp -r "$BUILD/jniLibs/renderer/." "$BUILD/jniLibs/packager/"
 

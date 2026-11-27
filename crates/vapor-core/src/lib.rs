@@ -314,19 +314,22 @@ pub extern "C" fn vapor_api() -> *const VaporApi {
 // NativeActivity 桥接（由 vapor-renderer / vapor-packager 的 JNI 调用）
 // ---------------------------------------------------------------------------
 
-/// JNI 入口：由 Java 层在 Surface 创建后调用。
-/// 第一个参数 env 是 JNIEnv*，可从其函数表 GetJavaVM 取出 JavaVM* 自动注入桥接层，
-/// 这样 C/Python 扩展无需任何额外配置即可调用 JNI。
+/// JNI 入口：由 Java 层 RendererActivity 在 Surface 创建后调用。
+/// 参数 surface 是 android.view.Surface 对象，用 ANativeWindow_fromSurface 取原生窗口。
+/// 同时从 JNIEnv::GetJavaVM 取出 JavaVM* 注入桥接层，使 C/Python 扩展开箱即调 JNI。
 #[cfg(target_os = "android")]
 #[no_mangle]
+#[allow(non_snake_case)]
 pub extern "C" fn Java_com_vapor_RendererActivity_nativeInit(
     env: *mut c_void,
-    _thiz: c_void,
-    window: c_void,
+    _thiz: *mut c_void,
+    surface: *mut c_void,
     w: i32,
     h: i32,
+    app_dir: *const c_char,
+    private_dir: *const c_char,
 ) {
-    // JNIEnv::GetJavaVM 位于函数表偏移 GetJavaVM（见 jni_table.rs）
+    // 1) 注入 JavaVM*（JNIEnv::GetJavaVM 见 jni_table.rs）
     unsafe {
         let table = &*(*(env as *const *const jni_table::JNINativeTable));
         type GetJavaVMFn = unsafe extern "C" fn(*mut c_void, *mut *mut c_void) -> i32;
@@ -336,14 +339,74 @@ pub extern "C" fn Java_com_vapor_RendererActivity_nativeInit(
             jni::set_vm(vm);
         }
     }
-    renderer::init_from_window(window as *mut c_void);
+    // 2) 从 Surface 取 ANativeWindow 并初始化 EGL/GLES
+    unsafe {
+        let window = android_native_window_from_surface(env, surface);
+        if !window.is_null() {
+            renderer::init_from_window(window);
+        }
+    }
     state::resize_fb(w, h);
+    // 3) 设置路径（供 bundled_python_home 定位解压后的 Python 运行时）
+    let app = cstr(app_dir).unwrap_or("").to_string();
+    let private = cstr(private_dir).unwrap_or("").to_string();
+    state::set_paths(&app, &private, "");
+    // 4) 初始化引擎 + 启动内嵌 CPython 执行逻辑包 main.py
+    let cfg = VaporConfig {
+        app_dir: app_dir,
+        private_dir: private_dir,
+        external_dir: std::ptr::null(),
+        width: w,
+        height: h,
+        enable_python: 1,
+    };
+    vapor_init(&cfg);
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn Java_com_vapor_RendererActivity_nativeResize(
+    _env: *mut c_void, _thiz: *mut c_void, w: i32, h: i32) {
+    state::resize_fb(w, h);
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn Java_com_vapor_RendererActivity_nativeRender(_env: *mut c_void, _thiz: *mut c_void) {
+    renderer::present();
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn Java_com_vapor_RendererActivity_nativeShutdown(_env: *mut c_void, _thiz: *mut c_void) {
+    vapor_shutdown();
+}
+
+#[cfg(target_os = "android")]
+extern "C" {
+    // ANativeWindow_fromSurface(JNIEnv*, jobject) -> ANativeWindow*
+    #[link_name = "ANativeWindow_fromSurface"]
+    fn android_native_window_from_surface(env: *mut c_void, surface: *mut c_void) -> *mut c_void;
 }
 
 #[cfg(not(target_os = "android"))]
 #[allow(non_snake_case)]
 pub extern "C" fn Java_com_vapor_RendererActivity_nativeInit(
-    _env: *mut c_void, _thiz: c_void, _window: c_void, _w: i32, _h: i32) {}
+    _env: *mut c_void, _thiz: *mut c_void, _surface: *mut c_void, _w: i32, _h: i32,
+    _app_dir: *const c_char, _private_dir: *const c_char) {}
+#[cfg(not(target_os = "android"))]
+#[allow(non_snake_case)]
+pub extern "C" fn Java_com_vapor_RendererActivity_nativeResize(
+    _env: *mut c_void, _thiz: *mut c_void, _w: i32, _h: i32) {}
+#[cfg(not(target_os = "android"))]
+#[allow(non_snake_case)]
+pub extern "C" fn Java_com_vapor_RendererActivity_nativeRender(_env: *mut c_void, _thiz: *mut c_void) {}
+#[cfg(not(target_os = "android"))]
+#[allow(non_snake_case)]
+pub extern "C" fn Java_com_vapor_RendererActivity_nativeShutdown(_env: *mut c_void, _thiz: *mut c_void) {}
 
 #[allow(dead_code)]
 fn _use_c_uint(_: c_uint) {}

@@ -39,17 +39,20 @@ else
   RES_ARG=""
 fi
 
+mkdir -p "$TMP/gen"
 AAPT_ARGS=(
   link -o "$BASE_APK"
   -I "$PLATFORM"
-  -M "$MANIFEST"
+  --manifest "$MANIFEST"
   --java "$TMP/gen"
   --min-sdk-version 24
   --target-sdk-version 35
   --version-code 1
   --version-name 1.0.0
 )
-[ -n "$RES_ARG" ] && AAPT_ARGS+=($RES_ARG)
+if [ -d "$RES" ] && [ -n "$(ls -A "$RES" 2>/dev/null)" ]; then
+  AAPT_ARGS+=(-R "$RES_ZIP")
+fi
 [ -d "$ASSETS" ] && AAPT_ARGS+=(-A "$ASSETS")
 "$BT/aapt2" "${AAPT_ARGS[@]}"
 
@@ -72,8 +75,12 @@ else
 fi
 
 # 4) 合并 so + dex 到 APK（zip 更新）
+# 原生库必须位于 APK 内的 lib/<abi>/ 下，Android 才会安装到 nativeLibraryDir。
 cp "$BASE_APK" "$TMP/app-unsigned.apk"
-( cd "$JNI" && zip -r "$TMP/app-unsigned.apk" . ) 2>/dev/null || true
+LIBSTAGE="$TMP/libstage"
+rm -rf "$LIBSTAGE" && mkdir -p "$LIBSTAGE/lib"
+cp -r "$JNI"/* "$LIBSTAGE/lib/" 2>/dev/null || true
+( cd "$LIBSTAGE" && zip -r "$TMP/app-unsigned.apk" lib ) >/dev/null 2>&1 || true
 [ -f "$DEX" ] && ( cd "$TMP" && zip -q "$TMP/app-unsigned.apk" classes.dex )
 
 # 5) zipalign
@@ -85,7 +92,7 @@ KS="$ROOT/packager_assets/release.keystore"
 if [ ! -f "$KS" ]; then
   keytool -genkeypair -keystore "$KS" -alias vapor \
     -keyalg RSA -keysize 2048 -validity 10000 \
-    -storepass vapor -keypass vapor \
+    -storepass vapor123 -keypass vapor123 \
     -dname "CN=Vapor, OU=Vapor, O=Vapor, L=NA, ST=NA, C=CN" >/dev/null 2>&1
 fi
 case "$APP" in
@@ -94,7 +101,7 @@ case "$APP" in
   *) FINAL="$OUT/Vapor-${APP}.apk" ;;
 esac
 "$BT/apksigner" sign --ks "$KS" --ks-key-alias vapor \
-  --ks-pass pass:vapor --key-pass vapor \
+  --ks-pass pass:vapor123 --key-pass pass:vapor123 \
   --v1-signing-enabled true --v2-signing-enabled true \
   --out "$FINAL" "$ALIGNED"
 
