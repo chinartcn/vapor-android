@@ -385,7 +385,11 @@ pub extern "C" fn Java_com_vapor_RendererActivity_nativeShutdown(_env: *mut c_vo
     vapor_shutdown();
 }
 
+// ANativeWindow_fromSurface 属于 libandroid.so，必须显式链接。
+// 不能依赖构建工具（cargo-ndk / 裸 cargo build --target）的隐式行为：
+// 一旦缺失 -landroid，System.loadLibrary 阶段就会抛 UnsatisfiedLinkError。
 #[cfg(target_os = "android")]
+#[link(name = "android")]
 extern "C" {
     // ANativeWindow_fromSurface(JNIEnv*, jobject) -> ANativeWindow*
     #[link_name = "ANativeWindow_fromSurface"]
