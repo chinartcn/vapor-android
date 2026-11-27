@@ -88,6 +88,10 @@ struct PyApi {
 static PY_HANDLE: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static PY_API: Mutex<Option<PyApi>> = Mutex::new(None);
 static PY_READY: AtomicBool = AtomicBool::new(false);
+/// 是否已经尝试过初始化（无论成功失败）。CPython 全进程只能安全初始化一次；
+/// 若首次失败后再次 Py_InitializeFromConfig，会因全局状态残留触发
+/// "error reading frozen getpath.py" 等连锁错误。故失败后不再重试。
+static PY_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 static GIL: Mutex<()> = Mutex::new(());
 
 unsafe fn resolve<T: Copy>(handle: *mut c_void, name: &str) -> Result<T, ()> {
@@ -125,6 +129,17 @@ fn load_python() -> Result<*mut c_void, ()> {
 pub fn py_init(app_dir: *const c_char) -> i32 {
     if PY_READY.load(Ordering::Acquire) {
         return VAPOR_OK;
+    }
+    // 幂等保护：CPython 全进程只允许初始化一次。若上次尝试失败（Py_InitializeFromConfig
+    // 返回错误），全局状态处于半初始化，再次初始化会因 frozen getpath 模块状态损坏而
+    // 报 "error reading frozen getpath.py"。因此失败后标记 attempted，直接返回错误，
+    // 不再重试，避免连锁崩溃。surface 反复创建时也能稳定不崩。
+    if PY_ATTEMPTED.swap(true, Ordering::AcqRel) {
+        crate::log::log_msg(
+            crate::log::LOG_WARN,
+            "CPython 已尝试过初始化，跳过重复初始化（避免全局状态残留崩溃）",
+        );
+        return VAPOR_ERR_STATE;
     }
     let handle = match load_python() {
         Ok(h) => h,
@@ -335,11 +350,26 @@ pub fn py_install_requirements(path: *const c_char) -> i32 {
 }
 
 pub fn shutdown() {
+    // CPython 解释器作为「进程级单例」常驻，不在 surface 销毁时 finalize / dlclose。
+    // 原因：Android SurfaceView 的 surface 会因横竖屏、前后台切换反复销毁重建；
+    // Py_FinalizeEx 后再 Py_InitializeFromConfig 会损坏 frozen getpath 模块状态，
+    // 第二次初始化报 "error reading frozen getpath.py"，且大多数扩展不支持重入式
+    // finalize/re-init。保持解释器存活，surface 重建时 py_init 直接返回 OK 复用，
+    // 既避免连锁崩溃，也保证重建后 Python 逻辑仍可用。
+    //
+    // 只有在「从未成功初始化」时才无需处理（PY_ATTEMPTED 会阻止危险的重试）。
+    let _ = PY_ATTEMPTED.load(Ordering::Acquire);
+    let _ = PY_READY.load(Ordering::Acquire);
+}
+
+/// 强制终结解释器（仅供显式 API 调用；正常运行路径不使用，见 shutdown 注释）。
+/// 保留 finalize 符号引用，避免编译器将其优化掉。
+#[allow(dead_code)]
+pub fn py_finalize_forced() {
     if !PY_READY.swap(false, Ordering::AcqRel) {
         return;
     }
-    let api = PY_API.lock().unwrap();
-    if let Some(a) = api.as_ref() {
+    if let Some(a) = PY_API.lock().unwrap().as_ref() {
         unsafe { (a.finalize)() };
     }
     let h = PY_HANDLE.swap(std::ptr::null_mut(), Ordering::AcqRel);

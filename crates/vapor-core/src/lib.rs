@@ -27,6 +27,31 @@ fn cstr(p: *const c_char) -> Option<&'static str> {
     }
 }
 
+/// 把 JNI 传入的 jstring（本质是 jobject 指针，不是 char*）正确转换为 Rust String。
+///
+/// 关键：Java 侧 nativeInit(..., String appDir, String privateDir) 传给 native 层的是
+/// `jstring`（指向 VM 内部字符串的 jobject），绝不能当 `const char*` 直接 `CStr::from_ptr`
+/// 读取——那会把 jobject 的内存当字符串，通常得到空串或乱码。这正是真机上 Python 路径
+/// 变成 `/python/...`、encodings 找不到的根因。必须走 JNIEnv 函数表的 GetStringUTFChars。
+#[cfg(target_os = "android")]
+unsafe fn jstring_to_string(env: *mut c_void, s: *const c_char) -> String {
+    if s.is_null() {
+        return String::new();
+    }
+    let table = &*(*(env as *const *const jni_table::JNINativeTable));
+    type GetCharsFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut u8) -> *const c_char;
+    type ReleaseFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_char);
+    let get: GetCharsFn = std::mem::transmute_copy(&table.GetStringUTFChars);
+    let rel: ReleaseFn = std::mem::transmute_copy(&table.ReleaseStringUTFChars);
+    let chars = get(env, s as *mut c_void, std::ptr::null_mut());
+    if chars.is_null() {
+        return String::new();
+    }
+    let out = CStr::from_ptr(chars).to_string_lossy().into_owned();
+    rel(env, s as *mut c_void, chars);
+    out
+}
+
 // ---------------------------------------------------------------------------
 // 版本与生命周期
 // ---------------------------------------------------------------------------
@@ -348,13 +373,19 @@ pub extern "C" fn Java_com_vapor_RendererActivity_nativeInit(
     }
     state::resize_fb(w, h);
     // 3) 设置路径（供 bundled_python_home 定位解压后的 Python 运行时）
-    let app = cstr(app_dir).unwrap_or("").to_string();
-    let private = cstr(private_dir).unwrap_or("").to_string();
+    // 关键修复：app_dir / private_dir 是 JNI jstring（jobject 指针），必须用
+    // GetStringUTFChars 转换；直接当 char* 读会得到空串，导致 Python 路径错乱。
+    let app = unsafe { jstring_to_string(env, app_dir) };
+    let private = unsafe { jstring_to_string(env, private_dir) };
+    log::log_msg(log::LOG_INFO, &format!("nativeInit 路径: app={app}, private={private}"));
     state::set_paths(&app, &private, "");
     // 4) 初始化引擎 + 启动内嵌 CPython 执行逻辑包 main.py
+    // 用转换后的 Rust String 构造 CString，保证传入的是有效的 UTF-8 C 字符串。
+    let app_c = std::ffi::CString::new(app.as_str()).unwrap_or_default();
+    let private_c = std::ffi::CString::new(private.as_str()).unwrap_or_default();
     let cfg = VaporConfig {
-        app_dir: app_dir,
-        private_dir: private_dir,
+        app_dir: app_c.as_ptr(),
+        private_dir: private_c.as_ptr(),
         external_dir: std::ptr::null(),
         width: w,
         height: h,
