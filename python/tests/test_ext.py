@@ -11,6 +11,8 @@ import ctypes
 import os
 import sys
 
+import pytest
+
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(ROOT, "python"))
 
@@ -18,10 +20,16 @@ import rust.Vapor as V
 from rust import _abi
 
 lib = _abi.lib()
+EXT_SO = os.path.join(ROOT, "protocol", "example", "lib", "libhello_c.so")
+if _abi.USING_FALLBACK or not os.path.exists(EXT_SO):
+    pytest.skip(
+        "test_ext 需要原生 libvapor.so 与已编译的 libhello_c.so",
+        allow_module_level=True,
+    )
 V.init(app_dir=os.path.join(ROOT, "protocol", "example"), width=64, height=48)
 V.clear(V.rgb(0, 0, 0))
 
-so = os.path.join(ROOT, "protocol", "example", "lib", "libhello_c.so").encode()
+so = EXT_SO.encode()
 rc = lib.vapor_ext_load_c(so, b"vapor_ext_init")
 assert rc == 0, f"C 扩展加载失败: {rc}"
 print("  [ok] C 扩展加载成功")

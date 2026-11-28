@@ -88,6 +88,11 @@ class VaporEvent(Structure):
 EXT_INIT = CFUNCTYPE(c_int32, c_void_p)
 
 
+def _unwrap(ref):
+    """兼容 ctypes.byref(...) 传入：取回被引用的对象。"""
+    return getattr(ref, "_obj", ref)
+
+
 class _Fallback:
     """无原生库时的内存回退，保持 API 形态一致，便于逻辑开发。"""
 
@@ -103,6 +108,7 @@ class _Fallback:
         a[0], b[0], c[0] = 1, 0, 0
     def vapor_cpython_version(self): return b"3.15.2"
     def vapor_init(self, cfg):
+        cfg = _unwrap(cfg)
         self._paths = (cfg.app_dir or b"", cfg.private_dir or b"", cfg.external_dir or b"")
         return VAPOR_OK
     def vapor_shutdown(self): return VAPOR_OK
@@ -111,6 +117,7 @@ class _Fallback:
         self._buf = bytearray(w * h * 4)
         return VAPOR_OK
     def vapor_fb_lock(self, out):
+        out = _unwrap(out)
         out.pixels = (c_uint8 * len(self._buf)).from_buffer(self._buf)
         out.width, out.height = self._w, self._h
         out.stride = self._w * 4
@@ -128,10 +135,16 @@ class _Fallback:
         self._buf[:] = bytes((r, g, b, a)) * (self._w * self._h)
         return VAPOR_OK
     def vapor_poll_event(self, out):
-        if self._events:
-            out[0] = self._events.pop(0)
-            return VAPOR_OK
-        return VAPOR_NO_EVENT
+        if not self._events:
+            return VAPOR_NO_EVENT
+        ev = self._events.pop(0)
+        target = _unwrap(out)
+        if isinstance(target, Structure):
+            for name, *_ in target._fields_:
+                setattr(target, name, getattr(ev, name))
+        else:
+            target[0] = ev
+        return VAPOR_OK
     def vapor_event_count(self): return len(self._events)
     def vapor_set_title(self, title): return VAPOR_OK
     def vapor_set_bg_color(self, rgba): return VAPOR_OK

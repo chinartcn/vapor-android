@@ -13,7 +13,7 @@ from .input import Event, PointerRouter
 from .layout import layout
 from .navigation import Navigator, _resolve_navigator, close_app_navigators
 from .paint import _paint_node
-from .renderer import Renderer, _warn
+from .renderer import Renderer, _warn, flush_dirty
 
 __all__ = ["App", "on_tick", "create_app", "mount"]
 
@@ -86,11 +86,26 @@ class App:
                 _warn(f"on_tick 回调失败: {exc}")
         try:
             if self.root is not None:
+                # effect 可能在帧外同步执行，先落账再布局（begin_frame 已清空过）。
+                flush_dirty()
                 layout(self.root, 0, 0, self.width, self.height)
                 canvas = self.surface.canvas()
-                canvas.clear(color(self.background))
-                _paint_node(canvas, self.root)
-                self.surface.present(ledger.rects() if self.dirty_rects else None)
+                bg = color(self.background)
+                rects = ledger.rects() if self.dirty_rects else None
+                if self.dirty_rects and not ledger.is_full and not rects:
+                    # 本帧没有任何变化：不重绘、不上传（present([]) 会被当作全帧）。
+                    pass
+                else:
+                    if rects is None or ledger.is_full:
+                        # 全帧：清屏后整树重绘（首帧 / resize / clear 请求）。
+                        canvas.clear(bg)
+                    else:
+                        # 局部：只把脏矩形重填背景擦除旧内容，随后整树重绘恢复
+                        # 其中未变化的像素；最后仅上传这些脏矩形。
+                        for x, y, w, h in rects:
+                            canvas.fill_rect(x, y, w, h, bg)
+                    _paint_node(canvas, self.root)
+                    self.surface.present(rects)
         finally:
             if self.dirty_rects:
                 ledger.end_frame()

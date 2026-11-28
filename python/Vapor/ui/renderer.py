@@ -29,6 +29,25 @@ except ImportError:  # pragma: no cover - A 合入后走真实账本
 
 _core = _native.core
 
+# 响应式 effect 可能在帧外同步执行（纯 Python 回退），此时直接写 ledger 会被
+# 下一帧的 begin_frame 清空。先入队，帧内 begin_frame 之后由 flush_dirty() 落账。
+_PENDING_RECTS = []
+
+
+def queue_dirty(x, y, w, h):
+    if w > 0 and h > 0:
+        _PENDING_RECTS.append((x, y, w, h))
+
+
+def flush_dirty():
+    """把帧外累积的响应式脏区写入 ledger（在 begin_frame 之后调用）。"""
+    if not _PENDING_RECTS:
+        return
+    pending = list(_PENDING_RECTS)
+    _PENDING_RECTS.clear()
+    for x, y, w, h in pending:
+        ledger.mark_rect(x, y, w, h)
+
 __all__ = [
     "Renderer", "Component", "define_component", "register", "COMPONENTS",
     "STRICT_MISSING_COMPONENTS",
@@ -193,8 +212,7 @@ class Renderer:
             # 标记的是“变化前占据的区域”，用于擦除；变化后的新区域由 layout 对比覆盖。
             if node is not None:
                 b = node.box
-                if b.w > 0 and b.h > 0:
-                    ledger.mark_rect(b.x, b.y, b.w, b.h)
+                queue_dirty(b.x, b.y, b.w, b.h)
             return fn()
 
         handle = _core.effect(wrapped, scheduler)
@@ -414,8 +432,7 @@ def _mark_subtree(node):
         return
     for n in node.walk():
         b = n.box
-        if b.w > 0 and b.h > 0:
-            ledger.mark_rect(b.x, b.y, b.w, b.h)
+        queue_dirty(b.x, b.y, b.w, b.h)
 
 
 def _warn(msg):

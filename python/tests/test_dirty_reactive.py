@@ -73,6 +73,7 @@ def test_bind_text_marks_node_box(monkeypatch):
     spy.clear()
     value.value = "hello"
     core.flush_jobs()
+    renderer_mod.flush_dirty()
 
     assert (10.0, 20.0, 80.0, 24.0) in spy.rects()
 
@@ -91,6 +92,7 @@ def test_bind_attr_marks_node_box(monkeypatch):
     spy.clear()
     color.value = "#FFFFFF"
     core.flush_jobs()
+    renderer_mod.flush_dirty()
 
     assert (4.0, 6.0, 30.0, 12.0) in spy.rects()
 
@@ -165,6 +167,7 @@ def test_bind_if_removal_marks_subtree(monkeypatch):
     spy.clear()
     flag.value = False
     core.flush_jobs()
+    renderer_mod.flush_dirty()
 
     rects = spy.rects()
     assert (10.0, 10.0, 100.0, 40.0) in rects
@@ -191,4 +194,17 @@ def test_paint_cull_skips_nodes_outside_dirty_rects(monkeypatch):
     inside = Node("View", {"bg": "#FFFFFF"})
     inside.box = Rect(2, 2, 20, 20)
     paint_mod._paint_node(canvas, inside)
+    assert canvas.fills
+
+
+def test_paint_cull_empty_rects_falls_back_to_full(monkeypatch):
+    """无脏矩形（本帧无变化）时不能当作裁剪区，否则整棵树被跳过（H-8）。"""
+    spy = Spy()  # is_full=False 且 rects 为空
+    monkeypatch.setattr(paint_mod, "ledger", spy)
+    monkeypatch.setattr(paint_mod, "CULL", True)
+
+    node = Node("View", {"bg": "#FFFFFF"})
+    node.box = Rect(0, 0, 20, 20)
+    canvas = FakeCanvas()
+    paint_mod._paint_node(canvas, node)
     assert canvas.fills

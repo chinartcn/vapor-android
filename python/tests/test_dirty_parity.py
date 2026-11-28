@@ -58,6 +58,41 @@ def test_dirty_and_full_render_identical():
     assert full_first != full_second        # 确认动态更新确实生效
 
 
+def test_dirty_upload_area_shrinks_for_small_change():
+    """小范围变化必须产生非空且远小于全屏的脏区（防止 clear 一票否决）。"""
+    holder = {}
+    surface = Surface(200, 120, use_native=False)
+    app = V.App(_scene(holder), surface=surface, dirty_rects=True)
+    app.mount()                                   # 首帧：全量
+
+    calls = []
+    surface.present = lambda rects=None: calls.append(rects)
+
+    holder["label"].value = "CD"
+    app.tick()
+
+    rects = calls[-1]
+    assert rects, "小范围文字变化应产生脏矩形，而不是退化为全帧"
+    area = sum(w * h for _, _, w, h in rects)
+    assert area < 0.1 * 200 * 120, (rects, area)
+    app.unmount()
+
+
+def test_idle_frame_does_not_upload():
+    """无变化帧不能调用 present（空列表会被旧绑定当作全帧上传）。"""
+    holder = {}
+    surface = Surface(200, 120, use_native=False)
+    app = V.App(_scene(holder), surface=surface, dirty_rects=True)
+    app.mount()
+
+    calls = []
+    surface.present = lambda rects=None: calls.append(rects)
+    app.tick()
+
+    assert calls == []
+    app.unmount()
+
+
 def test_canvas_marks_drawn_rect():
     surface = Surface(100, 100, use_native=False)
     ledger.set_canvas(100, 100)

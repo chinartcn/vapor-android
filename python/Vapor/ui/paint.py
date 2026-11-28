@@ -56,10 +56,11 @@ def _paint_node(canvas, node: Node, clip=None):
         return
 
     if CULL and clip is None and not ledger.is_full:
-        clip = ledger.rects()
+        # 空列表表示“本帧没有任何变化”，不能当作裁剪区域，否则会跳过整棵树。
+        clip = ledger.rects() or None
 
     box = node.box
-    if clip is not None and box.w > 0 and box.h > 0 and not _any_intersect(box, clip):
+    if clip and box.w > 0 and box.h > 0 and not _any_intersect(box, clip):
         return
 
     # 容器壳（插槽 fragment / 组件节点）自己没有绘制，但必须继续向下遍历，
