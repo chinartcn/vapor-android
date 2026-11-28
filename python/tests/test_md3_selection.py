@@ -75,7 +75,7 @@ def test_radio_group_is_stateless():
 def test_switch_theme_colors():
     theme = current_theme()
     _r, _s, off = build(sel.MdSwitch, checked=False)
-    assert off.props["_track"].props["bg"] == theme.role("surfaceVariant")
+    assert off.props["_track"].props["bg"] == theme.role("surfaceContainerHighest")
     _r2, _s2, on = build(sel.MdSwitch, checked=True)
     assert on.props["_track"].props["bg"] == theme.role("primary")
 
@@ -134,14 +134,14 @@ def test_a11y_on_all():
         _r, shell, _root = build(cls)
         found = [sel.get_a11y(n) for n in shell.walk() if sel.get_a11y(n) is not None]
         assert found, f"{cls.name} 缺少无障碍信息"
-        assert found[0]["role"] == role
+        assert found[0].role == role
 
 
 def test_chip_filter_a11y_checkbox():
     _r, shell, _root = build(sel.MdChip, variant="filter", selected=True)
     found = [sel.get_a11y(n) for n in shell.walk() if sel.get_a11y(n) is not None]
-    assert found[0]["role"] == sel.A11yRole.CHECKBOX
-    assert found[0]["checked"] is True
+    assert found[0].role == sel.A11yRole.CHECKBOX
+    assert found[0].state.get("checked") is True
 
 
 def test_no_hardcoded_hex():

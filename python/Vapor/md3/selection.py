@@ -64,6 +64,7 @@ except ImportError:  # pragma: no cover
 
 try:
     from ..ui.a11y import Role as A11yRole  # type: ignore
+    from ..ui.a11y import get_a11y as _real_get_a11y
     from ..ui.a11y import set_a11y as _real_set_a11y
 except ImportError:  # pragma: no cover
     class A11yRole:  # 与文档 3 的 Role 成员保持同名
@@ -73,6 +74,7 @@ except ImportError:  # pragma: no cover
         TEXT = "text"
 
     _real_set_a11y = None
+    _real_get_a11y = None
 
 
 def theme_color(name: str) -> int:
@@ -101,8 +103,8 @@ def _type_size(name: str, default: float) -> float:
         return default
     style = _theme_get_type_style(name)
     if isinstance(style, dict):
-        return float(style.get("size", default))
-    return float(getattr(style, "size", default))
+        return float(style.get("size", style.get("fontSize", default)))
+    return float(getattr(style, "size", getattr(style, "fontSize", default)))
 
 
 def reduced_motion() -> bool:
@@ -112,17 +114,17 @@ def reduced_motion() -> bool:
 
 
 def get_a11y(node):
-    """读取本组件挂载的无障碍信息（文档 3 的 a11y 层合入前的只读入口）。"""
+    """读取本组件挂载的无障碍语义。"""
+    if _real_get_a11y is not None:
+        return _real_get_a11y(node)
     return node.extra.get("a11y")
 
 
 def _set_a11y(node, **info):
-    node.extra["a11y"] = dict(info)
     if _real_set_a11y is not None:
-        try:
-            _real_set_a11y(node, **info)
-        except TypeError:  # 真实层参数集不同，不影响本层信息
-            pass
+        _real_set_a11y(node, **info)
+    else:
+        node.extra["a11y"] = dict(info)
 
 
 def _attach_press(r, node, on_click, enabled):
@@ -328,7 +330,7 @@ class MdSwitch(Component):
         })
 
         r.bind_attr(track, "bg", lambda: theme_color("primary")
-                    if props.get("checked") else theme_color("surfaceVariant"))
+                    if props.get("checked") else theme_color("surfaceContainerHighest"))
         r.bind_attr(knob, "bg", lambda: theme_color("onPrimary")
                     if props.get("checked") else theme_color("outline"))
         r.bind_attr(knob, "x", lambda: _switch_handle_x(props.get("checked"), reduced_motion()))
@@ -387,7 +389,7 @@ class MdSlider(Component):
         root = r.element("view", {"w": "100%", "h": 32})
         track = r.element("view", {
             "absolute": True, "x": 0, "y": 14, "w": "100%", "h": 4,
-            "radius": 2, "bg": theme_color("surfaceVariant"),
+            "radius": 2, "bg": theme_color("surfaceContainerHighest"),
         })
         fill = r.element("view", {
             "absolute": True, "x": 0, "y": 14, "h": 4, "radius": 2,
