@@ -10,7 +10,6 @@
 //!   * FontStack 按字符回退：每个字符挑第一个有字形的字体；
 //!   * 绘制是逐像素 α 混合，直接写帧缓冲。
 
-use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use std::collections::HashMap;
@@ -476,22 +475,33 @@ pub fn wrap(faces: &[Arc<Face>], text: &str, px: f32, max_width: f64) -> Vec<Str
     lines
 }
 
+/// CPython 缓冲协议标志（与 CPython 头文件一致，避免依赖 pyo3-ffi 的常量导出）
+const PYBUF_WRITABLE: i32 = 0x0001;
+const PYBUF_C_CONTIGUOUS: i32 = 0x0020;
+
 fn with_pixels<R>(py: Python<'_>, buf: &Py<PyAny>, f: impl FnOnce(&mut [u8]) -> R) -> PyResult<R> {
-    let obj = buf.bind(py);
-    let pb = PyBuffer::<u8>::get(obj)?;
-    if pb.readonly() {
-        return Err(PyRuntimeError::new_err("帧缓冲是只读的"));
+    // 直接用 CPython 缓冲协议（pyo3::ffi），不依赖 pyo3::buffer 模块（0.30 已不导出）。
+    unsafe {
+        let obj = buf.bind(py).as_ptr();
+        let mut view: pyo3::ffi::Py_buffer = std::mem::zeroed();
+        let flags = PYBUF_WRITABLE | PYBUF_C_CONTIGUOUS;
+        if pyo3::ffi::PyObject_GetBuffer(obj, &mut view, flags) != 0 {
+            pyo3::ffi::PyErr_Clear();
+            return Err(PyRuntimeError::new_err(
+                "需要可写的 C 连续缓冲区（memoryview / bytearray）",
+            ));
+        }
+        let len = view.len.max(0) as usize;
+        let ptr = view.buf as *mut u8;
+        let result = if ptr.is_null() || len == 0 {
+            Err(PyRuntimeError::new_err("帧缓冲为空"))
+        } else {
+            let data = std::slice::from_raw_parts_mut(ptr, len);
+            Ok(f(data))
+        };
+        pyo3::ffi::PyBuffer_Release(&mut view);
+        result
     }
-    if !pb.is_c_contiguous() {
-        return Err(PyRuntimeError::new_err("帧缓冲必须是 C 连续内存"));
-    }
-    let count = pb.item_count();
-    let ptr = pb.buf_ptr() as *mut u8;
-    if ptr.is_null() {
-        return Err(PyRuntimeError::new_err("帧缓冲指针为空"));
-    }
-    let data = unsafe { std::slice::from_raw_parts_mut(ptr, count) };
-    Ok(f(data))
 }
 
 // ---------------------------------------------------------------------------

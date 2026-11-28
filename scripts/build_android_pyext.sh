@@ -14,10 +14,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-NDK="$ANDROID_NDK_HOME"
-if [ -z "$NDK" ]; then NDK="$ANDROID_NDK_ROOT"; fi
-API="$VAPOR_ANDROID_API"
-if [ -z "$API" ]; then API=24; fi
+NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+API="${VAPOR_ANDROID_API:-24}"
 OUT="$ROOT/build/pyext"
 RAW="$OUT/raw"
 
