@@ -595,10 +595,17 @@ def provide(key, value) -> None:
     _instance_stack[-1]["provides"][key] = value
 
 
-def inject(key, default=None):
+def inject(key, default=None, required=False):
+    """从组件实例栈注入 provide 的值。
+
+    required=True 时若整条实例链都没有提供该 key，抛出 RuntimeError（含 key 名）；
+    默认仍返回 default，保持向后兼容。
+    """
     for frame in reversed(_instance_stack):
         if key in frame["provides"]:
             return frame["provides"][key]
+    if required:
+        raise RuntimeError(f"inject() 未找到 provide 的值: key={key!r}")
     return default
 
 

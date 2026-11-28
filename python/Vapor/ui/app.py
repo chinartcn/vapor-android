@@ -11,7 +11,7 @@ from .colors import color
 from .dirty import ledger
 from .input import Event, PointerRouter
 from .layout import layout
-from .navigation import Navigator
+from .navigation import Navigator, _resolve_navigator, close_app_navigators
 from .paint import _paint_node
 from .renderer import Renderer, _warn
 
@@ -67,6 +67,7 @@ class App:
         if self.root is not None:
             self.root.dispose()
             self.root = None
+        close_app_navigators(self)  # current 回退到上一层栈
 
     # ---- 帧 ----
 
@@ -176,9 +177,9 @@ class App:
 
     def handle_back(self):
         """返回键：先让页面栈出栈，再交给 app.on("back") 的处理器。"""
-        nav = Navigator.current
+        nav = _resolve_navigator(self)
         if nav is not None and nav.depth > 1:
-            nav.pop()
+            nav.pop()  # 与 go_back 同一路径：触发 on_hide / on_show / on_result
             return True
         for fn in list(self._handlers.get("back", [])):
             try:

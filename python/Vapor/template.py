@@ -27,8 +27,10 @@ Host 协议（Vapor.ui.Renderer 实现）::
 
 from __future__ import annotations
 
+import ast
 import re
 from collections.abc import Mapping
+from functools import lru_cache
 
 __all__ = ["TemplateError", "parse", "compile_template", "CompiledTemplate", "Scope", "render_template"]
 
@@ -105,6 +107,112 @@ _SAFE_BUILTINS = {
 }
 
 _GLOBALS = {"__builtins__": _SAFE_BUILTINS, "__name__": "vapor.template"}
+
+
+# ---------------------------------------------------------------------------
+# 表达式沙箱：执行前用 AST 白名单校验，阻断对象图逃逸
+# ---------------------------------------------------------------------------
+
+# 即使名字出现在作用域里也不允许直接调用：它们能提供任意代码执行能力。
+_FORBIDDEN_CALLS = frozenset({
+    "__import__", "eval", "exec", "compile", "open", "input",
+    "getattr", "setattr", "delattr", "vars", "globals", "locals",
+    "dir", "help", "breakpoint", "memoryview", "object", "type",
+    "super", "property", "classmethod", "staticmethod", "exit", "quit",
+})
+
+# 语句（exec）里只允许简单赋值与表达式调用，控制流/定义类结构一律拒绝。
+_FORBIDDEN_NODES = (
+    ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal, ast.NamedExpr,
+    ast.Await, ast.Yield, ast.YieldFrom, ast.FunctionDef, ast.AsyncFunctionDef,
+    ast.ClassDef, ast.Delete, ast.Return, ast.Raise, ast.Assert, ast.With,
+    ast.AsyncWith, ast.For, ast.AsyncFor, ast.While, ast.If, ast.Try,
+    ast.ExceptHandler, ast.Match, ast.match_case, ast.Break, ast.Continue,
+)
+
+_ALLOWED_STATEMENTS = (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Expr, ast.Pass)
+
+# str.format 会在格式串内部解析属性路径（"{0.__class__}"），能绕过 AST 的
+# Attribute 检查；格式串里出现 dunder 字段时同样拒绝。
+_FORMAT_DUNDER_RE = re.compile(r"__[A-Za-z_]\w*__")
+
+
+def _is_dunder(name) -> bool:
+    return isinstance(name, str) and name.startswith("__") and name.endswith("__")
+
+
+def _reject(line: int, reason: str, expr: str):
+    where = f"第 {line} 行：" if line else ""
+    raise TemplateError(f"{where}模板表达式 {expr!r} 含不安全结构：{reason}")
+
+
+def _validate_expr(code, mode: str = "eval", line: int = 0):
+    """用 ast.walk 校验表达式/语句，拒绝沙箱逃逸结构。
+
+    保留字面量、算术/比较/布尔运算、容器、普通属性访问、白名单函数调用、
+    f-string、下标与条件表达式；拒绝 dunder 属性、import/global/nonlocal、
+    lambda 默认值、危险内建调用以及非常规调用目标（如 ``f()()``）。
+    """
+    if not isinstance(code, str):
+        # 调用方传入已编译代码对象时无法还原 AST；由 _compile_expr 入口保证校验。
+        return
+    try:
+        tree = ast.parse(code, f"<vapor:{line}>", mode=mode)
+    except SyntaxError as exc:
+        raise TemplateError(f"第 {line} 行：表达式非法 {code!r}：{exc.msg}") from exc
+
+    for node in ast.walk(tree):
+        if isinstance(node, _FORBIDDEN_NODES):
+            _reject(line, f"不允许的语法节点 {type(node).__name__}", code)
+
+        if isinstance(node, ast.Attribute) and _is_dunder(node.attr):
+            _reject(line, f"禁止访问 dunder 属性 {node.attr!r}", code)
+        if isinstance(node, ast.Name) and _is_dunder(node.id):
+            _reject(line, f"禁止使用 dunder 名字 {node.id!r}", code)
+        if isinstance(node, ast.Subscript):
+            key = node.slice
+            if isinstance(key, ast.Constant) and _is_dunder(key.value):
+                _reject(line, f"禁止通过下标访问 dunder 键 {key.value!r}", code)
+
+        if isinstance(node, ast.Lambda):
+            args = node.args
+            if args.defaults or any(d is not None for d in args.kw_defaults):
+                _reject(line, "lambda 不允许带参数默认值", code)
+
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name):
+                if func.id in _FORBIDDEN_CALLS or _is_dunder(func.id):
+                    _reject(line, f"禁止调用 {func.id!r}", code)
+            elif isinstance(func, ast.Attribute):
+                if _is_dunder(func.attr):
+                    _reject(line, f"禁止调用 dunder 方法 {func.attr!r}", code)
+            else:
+                _reject(line, "只允许调用函数名或对象方法", code)
+
+            if isinstance(func, ast.Attribute) and func.attr in ("format", "format_map"):
+                # "'{0.__class__}'.format(obj)" 的格式串在调用对象上，而非参数里。
+                candidates = [func.value, *node.args]
+                for item in candidates:
+                    if (isinstance(item, ast.Constant) and isinstance(item.value, str)
+                            and _FORMAT_DUNDER_RE.search(item.value)):
+                        _reject(line, "格式串中禁止 dunder 字段", code)
+
+        if mode == "exec" and isinstance(node, ast.Module):
+            for stmt in node.body:
+                if not isinstance(stmt, _ALLOWED_STATEMENTS):
+                    _reject(line, f"不允许的语句 {type(stmt).__name__}", code)
+
+
+@lru_cache(maxsize=512)
+def _compile_cached(source: str, mode: str):
+    return compile(source, "<vapor>", mode)
+
+
+def _exec_validated(source: str, scope: Scope, line: int = 0):
+    """校验后执行语句；赋值经 Scope.__setitem__ 回写到父作用域。"""
+    _validate_expr(source, mode="exec", line=line)
+    exec(_compile_cached(source, "exec"), _GLOBALS, scope)  # noqa: S102
 
 
 # ---------------------------------------------------------------------------
@@ -276,14 +384,31 @@ _COMPONENT_NAME = re.compile(r"^[A-Z]")
 
 
 def _compile_expr(expr: str, line: int = 0):
-    try:
-        return compile(expr.strip(), f"<vapor:{line}>", "eval")
-    except SyntaxError as exc:
-        raise TemplateError(f"第 {line} 行：表达式非法 {expr!r}：{exc.msg}") from exc
+    """编译模板表达式：先做 AST 沙箱校验，返回已校验的源码串供 _eval 求值。"""
+    source = expr.strip()
+    _validate_expr(source, mode="eval", line=line)
+    return source
 
 
 def _eval(code, scope: Scope):
-    return eval(code, _GLOBALS, scope)  # noqa: S307 —— 模板表达式是用户自己的代码
+    """求值模板表达式；源码串会在入口再次校验（编译自 _compile_expr 的更快）。"""
+    if isinstance(code, str):
+        _validate_expr(code, mode="eval")
+        code = _compile_cached(code, "eval")
+    return eval(code, _GLOBALS, scope)  # noqa: S307 —— 已在 AST 层沙箱化
+
+
+def _expression_mode(text: str, line: int) -> str:
+    """判断事件表达式是 eval 形式还是 exec 语句形式。"""
+    try:
+        ast.parse(text, mode="eval")
+        return "eval"
+    except SyntaxError:
+        try:
+            ast.parse(text, mode="exec")
+            return "exec"
+        except SyntaxError as exc:
+            raise TemplateError(f"第 {line} 行：事件表达式非法 {text!r}：{exc.msg}") from exc
 
 
 def _compile_handler(expr: str, line: int):
@@ -292,27 +417,24 @@ def _compile_handler(expr: str, line: int):
     表达式形式（on_tap / count + 1）按 eval 求值；若是语句（count += 1）按 exec 执行。
     """
     text = expr.strip()
-    try:
-        code = compile(text, f"<vapor-handler:{line}>", "eval")
-    except SyntaxError:
-        try:
-            exec_code = compile(text, f"<vapor-handler:{line}>", "exec")
-        except SyntaxError as exc:
-            raise TemplateError(f"第 {line} 行：事件表达式非法 {expr!r}：{exc.msg}") from exc
+    mode = _expression_mode(text, line)
+    _validate_expr(text, mode=mode, line=line)
 
+    if mode == "exec":
         def run_exec(event, scope):
-            local = scope.child({"$event": event})
-            exec(exec_code, _GLOBALS, local)  # noqa: S102
+            _exec_validated(text, scope.child({"$event": event}), line)
 
         return run_exec
 
     def run_eval(event, scope):
-        return _invoke_eval(code, scope.child({"$event": event}))
+        return _invoke_eval(text, scope.child({"$event": event}))
 
     return run_eval
 
 
 def _invoke_eval(code, scope):
+    if isinstance(code, str):
+        _validate_expr(code, mode="eval")
     value = _eval(code, scope)
     if callable(value):
         event = scope["$event"] if "$event" in scope else None
@@ -635,11 +757,14 @@ def _compile_element_body(el: Element, host, scope):
     if "v-model" in directives:
         expr = directives["v-model"]
         code = _compile_expr(expr, el.line)
-        setter_code = compile(f"{expr.strip()} = __model_value", f"<vapor-model:{el.line}>", "exec")
+        setter_src = f"{expr.strip()} = __model_value"
+        _validate_expr(setter_src, mode="exec", line=el.line)
         host.bind_model(
             node,
             lambda code=code: _eval(code, scope),
-            lambda value, code=setter_code: exec(code, _GLOBALS, scope.child({"__model_value": value})),  # noqa: S102
+            lambda value, src=setter_src: _exec_validated(
+                src, scope.child({"__model_value": value}), el.line
+            ),
         )
 
     # 子节点（组件用插槽，普通元素用子节点）

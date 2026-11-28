@@ -46,10 +46,37 @@ from . import ui
 __all__ = [
     "COMPONENT_ABI_VERSION", "Host", "ProviderError",
     "validate_provider", "register_provider", "load_provider",
-    "providers", "new_component", "TEMPLATES",
+    "providers", "new_component", "TEMPLATES", "component_sources",
 ]
 
 COMPONENT_ABI_VERSION = 1
+
+# 宿主默认支持的能力集。manifest 未声明 capabilities 的老提供者完全兼容。
+DEFAULT_HOST_CAPABILITIES = frozenset({"lifecycle.v1", "slot.default"})
+
+# 组件名 -> 来源标记。独立记录，不写入 COMPONENTS，保持其「名字 -> 类」的值语义。
+_COMPONENT_SOURCES: dict = {}
+
+
+def _warn(msg):
+    print(f"[Vapor.component] {msg}", file=sys.stderr)
+
+
+def _source_of(name):
+    return _COMPONENT_SOURCES.get(name, "Vapor.ui（内置或早期注册的组件）")
+
+
+def component_sources() -> dict:
+    """返回组件名 -> 来源的快照，便于诊断同名冲突。"""
+    return dict(_COMPONENT_SOURCES)
+
+
+def _mark_builtin_sources():
+    for _name in tuple(getattr(ui, "COMPONENTS", {})):
+        _COMPONENT_SOURCES.setdefault(_name, "Vapor.ui（内置）")
+
+
+_mark_builtin_sources()
 
 
 class ProviderError(RuntimeError):
@@ -59,14 +86,31 @@ class ProviderError(RuntimeError):
 class Host:
     """传给 provider.register(host) 的宿主句柄。"""
 
-    __slots__ = ("abi",)
+    __slots__ = ("abi", "capabilities", "_touched", "_replace_names")
 
-    def __init__(self, abi: int = COMPONENT_ABI_VERSION):
+    def __init__(self, abi: int = COMPONENT_ABI_VERSION, capabilities=None,
+                 replace_names=()):
         self.abi = abi
+        self.capabilities = frozenset(
+            DEFAULT_HOST_CAPABILITIES if capabilities is None else capabilities
+        )
+        # 本次 register 实际触碰过的名字，供 register_provider 精确回查。
+        self._touched = set()
+        # 已通过宿主预检、允许覆盖的名字；provider 内部重复注册时走 replace 语义。
+        self._replace_names = frozenset(replace_names or ())
 
-    def register(self, component_cls):
-        """注册一个 Vapor.ui.Component 子类，返回类本身。"""
-        return ui.register(component_cls)
+    def register(self, component_cls, replace=False):
+        """注册一个 Vapor.ui.Component 子类，返回类本身。
+
+        默认沿用 ui.register 的冲突策略；只有经 register_provider 预检放行的
+        名字才会自动以 replace=True 覆盖，避免 provider 内部重复注册误报。
+        """
+        name = getattr(component_cls, "name", "") or component_cls.__name__
+        if name in self._replace_names:
+            replace = True
+        result = ui.register(component_cls, replace=replace)
+        self._touched.add(name)
+        return result
 
     @property
     def components(self) -> dict:
@@ -110,11 +154,17 @@ def _check_manifest(manifest) -> dict:
         props = item.get("props", {})
         if not isinstance(props, dict):
             raise ProviderError(f"组件 {comp_name} 的 props 必须是 dict")
+    caps = manifest.get("capabilities")
+    if caps is not None:
+        if not isinstance(caps, (list, tuple)) or any(
+            not isinstance(c, str) or not c for c in caps
+        ):
+            raise ProviderError("manifest() 的 capabilities 必须是能力名字符串列表")
     return manifest
 
 
-def validate_provider(provider) -> list:
-    """校验提供者是否符合 ABI，返回声明的组件名列表（不注册）。"""
+def _validate_provider_shape(provider):
+    """仅做 ABI 静态校验，返回 manifest（replace/能力策略由调用方决定）。"""
     manifest_fn = getattr(provider, "manifest", None)
     register_fn = getattr(provider, "register", None)
     if not callable(manifest_fn):
@@ -125,21 +175,139 @@ def validate_provider(provider) -> list:
     abi = getattr(provider, "ABI", manifest.get("abi", 1))
     if isinstance(abi, int) and abi > COMPONENT_ABI_VERSION:
         raise ProviderError(f"提供者 ABI={abi} 高于宿主 {COMPONENT_ABI_VERSION}")
+    return manifest
+
+
+def _allow_replace(manifest, item, replace=False):
+    return bool(
+        replace or manifest.get("replace", False) or item.get("replace", False)
+    )
+
+
+def _check_global_conflicts(manifest, replace=False):
+    """清单组件名与全局注册表（内置 + 已注册扩展）比对，冲突拒绝并列出来源。"""
+    for item in manifest["components"]:
+        name = item["name"]
+        if name in ui.COMPONENTS and not _allow_replace(manifest, item, replace):
+            raise ProviderError(
+                f"组件名冲突: {name} 已由 {_source_of(name)} 注册，"
+                "使用 replace=True 覆盖"
+            )
+
+
+def _replace_names(manifest, replace=False):
+    return {
+        item["name"] for item in manifest["components"]
+        if _allow_replace(manifest, item, replace)
+    }
+
+
+def _check_capabilities(manifest, host):
+    """加载前协商能力：provider 需要的能力必须全部在宿主支持集内。"""
+    required = list(manifest.get("capabilities") or ())
+    missing = [c for c in required if c not in host.capabilities]
+    if missing:
+        raise ProviderError(
+            f"组件能力不受宿主支持: 提供者 {manifest['name']} 需要 "
+            f"{', '.join(required)}，宿主缺少 {', '.join(missing)}"
+            f"（宿主支持: {', '.join(sorted(host.capabilities)) or '无'}）"
+        )
+
+
+def _check_props_consistency(manifest):
+    """清单声明的 props 默认值必须与实现的类属性 props 一致。"""
+    for item in manifest["components"]:
+        name = item["name"]
+        declared = item.get("props") or {}
+        if not declared:
+            continue
+        cls = ui.COMPONENTS.get(name)
+        if cls is None:
+            continue
+        impl = getattr(cls, "props", None) or {}
+        for key, default in declared.items():
+            if key not in impl:
+                raise ProviderError(
+                    f"组件 {name} 的 props 与 manifest 不一致: 实现缺少 {key!r}"
+                )
+            if impl[key] != default:
+                raise ProviderError(
+                    f"组件 {name} 的 props 与 manifest 不一致: "
+                    f"{key!r} 实现={impl[key]!r}，清单={default!r}"
+                )
+        extra = sorted(set(impl) - set(declared))
+        if extra:
+            _warn(f"组件 {name} 的实现 props 未在 manifest 声明: {', '.join(extra)}")
+
+
+def _snapshot_state():
+    return dict(ui.COMPONENTS), dict(_COMPONENT_SOURCES)
+
+
+def _restore_state(components, sources):
+    """注册后校验失败时回滚全局注册表与来源表。"""
+    for name in list(ui.COMPONENTS):
+        if name not in components:
+            del ui.COMPONENTS[name]
+    ui.COMPONENTS.update(components)
+    _COMPONENT_SOURCES.clear()
+    _COMPONENT_SOURCES.update(sources)
+
+
+def validate_provider(provider, replace=False) -> list:
+    """静态校验提供者是否符合 ABI，返回声明的组件名列表（不注册、不查全局冲突）。
+
+    这里只做 ABI 静态形状校验。与全局注册表的同名冲突由 register_provider
+    在真正注册前检查——因为 presets 等内置提供者是「导入即注册」的，
+    对其调用 validate_provider 时组件本就在表里，不应被误判为冲突。
+    replace 参数保留以兼容旧调用签名。
+    """
+    manifest = _validate_provider_shape(provider)
     return [item["name"] for item in manifest["components"]]
 
 
-def register_provider(provider, abi: int = COMPONENT_ABI_VERSION) -> list:
-    """校验并注册一个组件提供者，返回注册的组件名列表。"""
-    expected = validate_provider(provider)
-    host = Host(abi)
-    before = set(ui.COMPONENTS)
+def register_provider(provider, abi: int = COMPONENT_ABI_VERSION,
+                      replace: bool = False, capabilities=None) -> list:
+    """校验并注册一个组件提供者，返回注册的组件名列表。
+
+    replace 可由调用方传入，也可由 manifest 顶层或单个组件的 "replace": true 声明。
+    capabilities 指定宿主能力集（缺省 DEFAULT_HOST_CAPABILITIES），加载前与
+    manifest.capabilities 协商，宿主不支持则拒绝。
+    """
+    manifest = _validate_provider_shape(provider)
+    expected = [item["name"] for item in manifest["components"]]
+    _check_global_conflicts(manifest, replace=replace)
+
+    host = Host(abi, capabilities=capabilities,
+                replace_names=_replace_names(manifest, replace))
+    _check_capabilities(manifest, host)
+
+    components_before, sources_before = _snapshot_state()
     provider.register(host)
-    registered = set(ui.COMPONENTS) - before
-    missing = [name for name in expected if name not in ui.COMPONENTS]
+
+    # 精确回查：只认本次 register 真正引入/覆盖的名字。名字"本来就在全局表里"
+    # 不再算注册成功；provider 内部重复注册由 _replace_names 消化，不误报。
+    touched = set(host._touched)
+    for name in expected:
+        if ui.COMPONENTS.get(name) is not components_before.get(name):
+            touched.add(name)
+    missing = [name for name in expected if name not in touched]
     if missing:
+        _restore_state(components_before, sources_before)
         raise ProviderError(
             "manifest 声明了但这些组件没有注册: " + ", ".join(missing)
+            + "（本次 register 未引入）"
         )
+
+    try:
+        _check_props_consistency(manifest)
+    except ProviderError:
+        _restore_state(components_before, sources_before)
+        raise
+
+    provider_name = manifest.get("name") or "unknown"
+    for name in expected:
+        _COMPONENT_SOURCES[name] = provider_name
     _PROVIDERS.append(provider)
     return expected
 

@@ -24,7 +24,7 @@ class Node:
     __slots__ = (
         "tag", "props", "children", "parent", "box", "events", "text",
         "effects", "scroll_y", "clip", "component", "key", "extra", "visible",
-        "pressed", "hover",
+        "pressed", "hover", "instance", "_disposed",
         # 上一帧布局后的 box（Rect 或 None），供脏区 old/new 对比。
         "prev_box",
     )
@@ -47,6 +47,8 @@ class Node:
         self.visible = True
         self.pressed = False   # 手指按下期间为 True（press/release 事件同步维护）
         self.hover = False     # 鼠标/触控板悬停（桌面调试用）
+        self.instance = None   # 组件节点持有 _Instance，dispose 时触发卸载钩子
+        self._disposed = False # dispose 幂等：递归/重复卸载只触发一次
 
     def add(self, *nodes):
         for node in nodes:
@@ -68,15 +70,33 @@ class Node:
             self.parent = None
 
     def dispose(self):
-        for handle in self.effects:
-            try:
-                handle.stop()
-            except Exception:
-                pass
-        self.effects.clear()
-        for child in list(self.children):
-            child.dispose()
-        self.children.clear()
+        # 幂等：v-if 切换 / v-for 重排可能多次 dispose 同一棵子树，
+        # 卸载钩子与清理函数只允许执行一次。
+        if self._disposed:
+            return
+        self._disposed = True
+        try:
+            instance = self.instance
+            if instance is not None:
+                on_unmounted = getattr(instance, "on_unmounted", None)
+                if callable(on_unmounted):
+                    try:
+                        on_unmounted(getattr(instance, "ctx", None))
+                    except Exception as exc:  # 钩子异常不应阻断卸载
+                        from .renderer import _warn
+
+                        _warn(f"组件卸载钩子失败: {exc}")
+            for handle in self.effects:
+                try:
+                    handle.stop()
+                except Exception:
+                    pass
+            self.effects.clear()
+            for child in list(self.children):
+                child.dispose()
+            self.children.clear()
+        finally:
+            self.instance = None
 
     def walk(self):
         yield self
