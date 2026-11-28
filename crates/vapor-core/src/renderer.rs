@@ -28,6 +28,15 @@ mod gles {
         pub fn eglMakeCurrent(d: EGLDisplay, draw: EGLSurface, read: EGLSurface, ctx: EGLContext) -> i32;
         pub fn eglSwapBuffers(d: EGLDisplay, s: EGLSurface) -> i32;
         pub fn eglGetError() -> i32;
+        pub fn eglDestroySurface(d: EGLDisplay, s: EGLSurface) -> i32;
+        pub fn eglDestroyContext(d: EGLDisplay, c: EGLContext) -> i32;
+        pub fn eglTerminate(d: EGLDisplay) -> i32;
+    }
+
+    #[link(name = "android")]
+    extern "C" {
+        pub fn ANativeWindow_getWidth(w: *mut c_void) -> i32;
+        pub fn ANativeWindow_getHeight(w: *mut c_void) -> i32;
     }
 
     #[link(name = "GLESv2")]
@@ -55,13 +64,15 @@ mod gles {
         pub fn glEnableVertexAttribArray(idx: u32);
         pub fn glVertexAttribPointer(idx: u32, size: i32, ty: u32, norm: u8, stride: i32, ptr: *const c_void);
         pub fn glDrawArrays(mode: u32, first: i32, count: i32);
-        // 着色器诊断：编译/链接失败时把驱动返回的 info log 打出来，
-        // 否则真机上只会看到黑屏 + 驱动侧的 "Failed to compile shader"。
-        pub fn glGetShaderiv(shader: u32, pname: u32, out: *mut i32);
-        pub fn glGetShaderInfoLog(shader: u32, buf_size: i32, length: *mut i32, info: *mut i8);
-        pub fn glGetProgramiv(prog: u32, pname: u32, out: *mut i32);
-        pub fn glGetProgramInfoLog(prog: u32, buf_size: i32, length: *mut i32, info: *mut i8);
         pub fn glBindAttribLocation(prog: u32, index: u32, name: *const i8);
+        pub fn glGetShaderiv(shader: u32, pname: u32, out: *mut i32);
+        pub fn glGetShaderInfoLog(shader: u32, cap: i32, len: *mut i32, log: *mut i8);
+        pub fn glGetProgramiv(prog: u32, pname: u32, out: *mut i32);
+        pub fn glGetProgramInfoLog(prog: u32, cap: i32, len: *mut i32, log: *mut i8);
+        pub fn glDeleteShader(shader: u32);
+        pub fn glDeleteProgram(prog: u32);
+        pub fn glDeleteTextures(n: i32, tex: *const u32);
+        pub fn glDeleteBuffers(n: i32, buf: *const u32);
     }
 
     pub const GL_TEXTURE_2D: u32 = 0x0DE1;
@@ -101,6 +112,8 @@ mod gles {
         pub display: EGLDisplay,
         pub surface: EGLSurface,
         pub context: EGLContext,
+        pub window: *mut c_void,
+        pub es2: bool,
         pub texture: u32,
         pub program: u32,
         pub vbo: u32,
@@ -123,19 +136,36 @@ mod gles {
         out vec4 frag;\n\
         void main(){ frag=texture(uTex, vUV); }";
 
-    // ES2 回退：部分老驱动（尤其低端 arm32 机型）只有 GLES2 上下文，
-    // 给它喂 `#version 300 es` 会直接编译失败 → 黑屏。
-    const VS_ES2: &str = "attribute vec2 aPos;\n\
+    // ES2 回退着色器：ES3 上下文创建失败时必须用这套，否则 #version 300 es 无法编译。
+    const VS_ES2: &str = "#version 100\n\
+        attribute vec2 aPos;\n\
         attribute vec2 aUV;\n\
         varying vec2 vUV;\n\
         void main(){ vUV=aUV; gl_Position=vec4(aPos,0.0,1.0); }";
 
-    const FS_ES2: &str = "precision mediump float;\n\
+    const FS_ES2: &str = "#version 100\n\
+        precision mediump float;\n\
         varying vec2 vUV;\n\
         uniform sampler2D uTex;\n\
         void main(){ gl_FragColor=texture2D(uTex, vUV); }";
 
-    fn compile(ty: u32, src: &str, tag: &str) -> u32 {
+    fn info_log_shader(sh: u32) -> String {
+        let mut buf = [0i8; 1024];
+        let mut len = 0i32;
+        unsafe { glGetShaderInfoLog(sh, buf.len() as i32, &mut len, buf.as_mut_ptr()); }
+        let n = len.max(0) as usize;
+        String::from_utf8_lossy(&buf[..n.min(buf.len())].iter().map(|b| *b as u8).collect::<Vec<u8>>()).to_string()
+    }
+
+    fn info_log_program(prog: u32) -> String {
+        let mut buf = [0i8; 1024];
+        let mut len = 0i32;
+        unsafe { glGetProgramInfoLog(prog, buf.len() as i32, &mut len, buf.as_mut_ptr()); }
+        let n = len.max(0) as usize;
+        String::from_utf8_lossy(&buf[..n.min(buf.len())].iter().map(|b| *b as u8).collect::<Vec<u8>>()).to_string()
+    }
+
+    fn compile(ty: u32, src: &str) -> Result<u32, String> {
         unsafe {
             let sh = glCreateShader(ty);
             let p = src.as_ptr() as *const i8;
@@ -144,22 +174,22 @@ mod gles {
             let mut ok = 0i32;
             glGetShaderiv(sh, GL_COMPILE_STATUS, &mut ok);
             if ok == 0 {
-                let mut buf = vec![0i8; 4096];
-                let mut len = 0i32;
-                glGetShaderInfoLog(sh, buf.len() as i32, &mut len, buf.as_mut_ptr());
-                let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-                let bytes: Vec<u8> = buf[..end].iter().map(|&c| c as u8).collect();
-                log_msg(
-                    crate::log::LOG_ERROR,
-                    &format!("{tag} 着色器编译失败: {}", String::from_utf8_lossy(&bytes)),
-                );
+                let log = info_log_shader(sh);
+                glDeleteShader(sh);
+                return Err(format!("着色器编译失败: {log}"));
             }
-            sh
+            Ok(sh)
         }
     }
 
     impl GlState {
-        pub fn new(display: EGLDisplay, surface: EGLSurface, context: EGLContext, es3: bool) -> Self {
+        pub fn new(
+            display: EGLDisplay,
+            surface: EGLSurface,
+            context: EGLContext,
+            window: *mut c_void,
+            es2: bool,
+        ) -> Result<Self, String> {
             unsafe {
                 eglMakeCurrent(display, surface, surface, context);
                 let mut tex = 0u32;
@@ -170,30 +200,41 @@ mod gles {
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as i32);
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as i32);
 
-                let (vs_src, fs_src) = if es3 { (VS_ES3, FS_ES3) } else { (VS_ES2, FS_ES2) };
-                let vs = compile(GL_VERTEX_SHADER, vs_src, "vertex");
-                let fs = compile(GL_FRAGMENT_SHADER, fs_src, "fragment");
+                let (vs_src, fs_src) = if es2 { (VS_ES2, FS_ES2) } else { (VS_ES3, FS_ES3) };
+                let vs = match compile(GL_VERTEX_SHADER, vs_src) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        glDeleteTextures(1, &tex);
+                        return Err(e);
+                    }
+                };
+                let fs = match compile(GL_FRAGMENT_SHADER, fs_src) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        glDeleteShader(vs);
+                        glDeleteTextures(1, &tex);
+                        return Err(e);
+                    }
+                };
                 let prog = glCreateProgram();
                 glAttachShader(prog, vs);
                 glAttachShader(prog, fs);
-                // 不依赖驱动默认的属性槽位：显式绑定到 0/1，避免不同 GPU 上
-                // 位置/UV 被分到别的 location 导致画面错乱。
+                // 显式绑定属性位置，避免不同驱动分配 0/1 之外的位置。
                 glBindAttribLocation(prog, 0, b"aPos\0".as_ptr() as *const i8);
                 glBindAttribLocation(prog, 1, b"aUV\0".as_ptr() as *const i8);
                 glLinkProgram(prog);
                 let mut linked = 0i32;
                 glGetProgramiv(prog, GL_LINK_STATUS, &mut linked);
                 if linked == 0 {
-                    let mut buf = vec![0i8; 4096];
-                    let mut len = 0i32;
-                    glGetProgramInfoLog(prog, buf.len() as i32, &mut len, buf.as_mut_ptr());
-                    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-                    let bytes: Vec<u8> = buf[..end].iter().map(|&c| c as u8).collect();
-                    log_msg(
-                        crate::log::LOG_ERROR,
-                        &format!("GL 程序链接失败: {}", String::from_utf8_lossy(&bytes)),
-                    );
+                    let log = info_log_program(prog);
+                    glDeleteShader(vs);
+                    glDeleteShader(fs);
+                    glDeleteProgram(prog);
+                    glDeleteTextures(1, &tex);
+                    return Err(format!("着色器链接失败: {log}"));
                 }
+                glDeleteShader(vs);
+                glDeleteShader(fs);
                 glUseProgram(prog);
                 let loc = glGetUniformLocation(prog, b"uTex\0".as_ptr() as *const i8);
                 glUniform1i(loc, 0);
@@ -218,8 +259,20 @@ mod gles {
                 // 避免同一 context 绑到两个线程导致后续线程 makeCurrent 行为异常。
                 eglMakeCurrent(display, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
 
-                GlState { display, surface, context, texture: tex, program: prog, vbo, tex_w: 0, tex_h: 0 }
+                Ok(GlState {
+                    display, surface, context, window, es2,
+                    texture: tex, program: prog, vbo, tex_w: 0, tex_h: 0,
+                })
             }
+        }
+
+        /// 物理窗口尺寸（旋转/分屏后随 Surface 变化）；取不到时退回帧缓冲尺寸。
+        fn viewport_size(&self, fb_w: i32, fb_h: i32) -> (i32, i32) {
+            if self.window.is_null() {
+                return (fb_w, fb_h);
+            }
+            let (w, h) = unsafe { (ANativeWindow_getWidth(self.window), ANativeWindow_getHeight(self.window)) };
+            if w > 0 && h > 0 { (w, h) } else { (fb_w, fb_h) }
         }
 
         pub fn draw(&mut self, pixels: &[u8], w: i32, h: i32) {
@@ -235,7 +288,8 @@ mod gles {
                 if eglMakeCurrent(self.display, self.surface, self.surface, self.context) == 0 {
                     return; // 绑定失败（surface 已销毁），跳过本帧
                 }
-                glViewport(0, 0, w, h);
+                let (vw, vh) = self.viewport_size(w, h);
+                glViewport(0, 0, vw, vh);
                 glClearColor(0.05, 0.06, 0.08, 1.0);
                 glClear(GL_COLOR_BUFFER_BIT);
                 glBindTexture(GL_TEXTURE_2D, self.texture);
@@ -266,6 +320,8 @@ mod gles {
 #[cfg(target_os = "android")]
 pub fn init_from_window(window: *mut std::ffi::c_void) {
     use gles::*;
+    // Surface 重建（旋转/切后台再回来）时先释放上一份 EGL/GL 资源，避免泄漏与残留状态。
+    destroy();
     unsafe {
         let d = eglGetDisplay(0);
         let mut maj = 0;
@@ -311,24 +367,59 @@ pub fn init_from_window(window: *mut std::ffi::c_void) {
         }
         let ctx_attrs = [EGL_CONTEXT_CLIENT_VERSION, if es3 { 3 } else { 2 }, EGL_NONE];
         let mut ctx = eglCreateContext(d, cfg, std::ptr::null_mut(), ctx_attrs.as_ptr());
+        let mut es2 = !es3;
         if ctx.is_null() && es3 {
             // ES3 上下文创建失败，回退 ES2（部分老驱动只支持 ES2）。
             es3 = false;
             let ctx_attrs2 = [EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE];
             ctx = eglCreateContext(d, cfg, std::ptr::null_mut(), ctx_attrs2.as_ptr());
+            es2 = true;
             log_msg(LOG_INFO, "EGL ES3 context 失败，回退 ES2");
         }
         if ctx.is_null() {
             log_msg(LOG_INFO, &format!("EGL eglCreateContext 失败 err=0x{:x}", eglGetError()));
+            eglDestroySurface(d, surf);
             return;
         }
         // 诊断：确认 surface/context/display 均有效后再初始化 GL 资源。
         log_msg(LOG_INFO, &format!(
             "EGL 就绪 d={:p} surf={:p} ctx={:p} es={}x{} gles={}",
-            d, surf, ctx, maj, min, if es3 { 3 } else { 2 }
+            d, surf, ctx, maj, min, if es2 { 2 } else { 3 }
         ));
-        let gl = GlState::new(d, surf, ctx, es3);
-        GL_STATE.lock().unwrap().replace(gl);
+        match GlState::new(d, surf, ctx, window, es2) {
+            Ok(gl) => {
+                GL_STATE.lock().unwrap().replace(gl);
+            }
+            Err(e) => {
+                // 着色器编译/链接失败必须显式暴露，不能静默黑屏。
+                log_msg(LOG_INFO, &format!("GL 初始化失败: {e}"));
+                eglMakeCurrent(d, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
+                eglDestroyContext(d, ctx);
+                eglDestroySurface(d, surf);
+            }
+        }
+    }
+}
+
+/// 释放 EGL/GL 资源（Surface 销毁、旋转重建、进程退出时调用）。
+pub fn destroy() {
+    #[cfg(target_os = "android")]
+    {
+        use gles::*;
+        let old = GL_STATE.lock().ok().and_then(|mut g| g.take());
+        if let Some(gl) = old {
+            unsafe {
+                eglMakeCurrent(gl.display, gl.surface, gl.surface, gl.context);
+                glDeleteBuffers(1, &gl.vbo);
+                glDeleteTextures(1, &gl.texture);
+                glDeleteProgram(gl.program);
+                eglMakeCurrent(gl.display, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
+                eglDestroySurface(gl.display, gl.surface);
+                eglDestroyContext(gl.display, gl.context);
+                eglTerminate(gl.display);
+            }
+            log_msg(LOG_INFO, "EGL/GL 资源已释放");
+        }
     }
 }
 

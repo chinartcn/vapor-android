@@ -111,7 +111,7 @@ class _Fallback:
         self._generation += 1
         return VAPOR_OK
     def vapor_fb_clear(self, rgba):
-        r, g, b, a = rgba & 255, (rgba >> 8) & 255, (rgba >> 16) & 255, (rgba >> 24) & 255
+        r, g, b, a = (rgba >> 16) & 255, (rgba >> 8) & 255, rgba & 255, (rgba >> 24) & 255
         self._buf[:] = bytes((r, g, b, a)) * (self._w * self._h)
         return VAPOR_OK
     def vapor_poll_event(self, out):

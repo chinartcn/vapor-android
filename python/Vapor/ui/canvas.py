@@ -71,8 +71,8 @@ class Canvas:
     def circle(self, cx, cy, r, c, width=1):
         self._c.circle(int(cx), int(cy), int(r), int(c), int(width))
 
-    def polygon(self, points, c):
-        self._c.polygon([(int(x), int(y)) for x, y in points], int(c))
+    def polygon(self, points, c, fill_rule="nonzero"):
+        self._c.polygon([(int(x), int(y)) for x, y in points], int(c), fill_rule)
 
     def polyline(self, points, c, width=1, closed=False):
         self._c.polyline([(int(x), int(y)) for x, y in points], int(c), int(width), bool(closed))

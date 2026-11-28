@@ -1,7 +1,7 @@
 //! 高速 2D 光栅化：直接写 RGBA8888 帧缓冲。
 //!
-//! 颜色打包格式与 Python 侧一致：0xAABBGGRR（低字节为 R），即
-//! color = (a << 24) | (b << 16) | (g << 8) | r。
+//! 颜色打包格式：0xAARRGGBB（与 CSS / Android `Color.argb()` 一致），
+//! 写入帧缓冲时再展开为 RGBA8888 字节序（R 在前）。
 //!
 //! 所有图元都是直接内存写入，无临时分配、无 Python 对象创建（除返回值）。
 
@@ -16,9 +16,9 @@ fn idx(x: i32, y: i32, w: i32) -> usize {
 #[inline]
 fn put(data: &mut [u8], w: i32, x: i32, y: i32, color: u32) {
     let i = idx(x, y, w);
-    let r = (color & 0xFF) as u8;
+    let r = ((color >> 16) & 0xFF) as u8;
     let g = ((color >> 8) & 0xFF) as u8;
-    let b = ((color >> 16) & 0xFF) as u8;
+    let b = (color & 0xFF) as u8;
     let a = ((color >> 24) & 0xFF) as u8;
     if a == 255 {
         data[i] = r;
@@ -37,7 +37,7 @@ fn put(data: &mut [u8], w: i32, x: i32, y: i32, color: u32) {
 
 #[inline]
 fn blend_px(data: &mut [u8], w: i32, x: i32, y: i32, r: u8, g: u8, b: u8, a: u8) {
-    let color = ((a as u32) << 24) | ((b as u32) << 16) | ((g as u32) << 8) | (r as u32);
+    let color = ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
     put(data, w, x, y, color);
 }
 
@@ -53,9 +53,9 @@ pub fn fill_rect_impl(data: &mut [u8], w: i32, h: i32, x: i32, y: i32, rw: i32, 
         return;
     }
     let a = ((color >> 24) & 0xFF) as u8;
-    let r = (color & 0xFF) as u8;
+    let r = ((color >> 16) & 0xFF) as u8;
     let g = ((color >> 8) & 0xFF) as u8;
-    let b = ((color >> 16) & 0xFF) as u8;
+    let b = (color & 0xFF) as u8;
     // 完整 4 字节写入的快速路径
     if a == 255 {
         let px = [r, g, b, 255u8];
@@ -144,7 +144,7 @@ pub fn ring_impl(data: &mut [u8], w: i32, h: i32, cx: i32, cy: i32, r: i32, widt
     }
 }
 
-pub fn polygon_impl(data: &mut [u8], w: i32, h: i32, pts: &[(i32, i32)], color: u32) {
+pub fn polygon_impl(data: &mut [u8], w: i32, h: i32, pts: &[(i32, i32)], color: u32, nonzero: bool) {
     if w <= 0 || h <= 0 || pts.len() < 3 {
         return;
     }
@@ -157,7 +157,7 @@ pub fn polygon_impl(data: &mut [u8], w: i32, h: i32, pts: &[(i32, i32)], color: 
     let y_start = min_y.max(0);
     let y_end = max_y.min(h - 1);
     let n = pts.len();
-    let mut xs: Vec<f64> = Vec::with_capacity(16);
+    let mut xs: Vec<(f64, i32)> = Vec::with_capacity(16);
     for yy in y_start..=y_end {
         let scan = yy as f64 + 0.5;
         xs.clear();
@@ -167,19 +167,29 @@ pub fn polygon_impl(data: &mut [u8], w: i32, h: i32, pts: &[(i32, i32)], color: 
             let (y1f, y2f) = (y1 as f64, y2 as f64);
             if (y1f <= scan && y2f > scan) || (y2f <= scan && y1f > scan) {
                 let t = (scan - y1f) / (y2f - y1f);
-                xs.push(x1 as f64 + t * (x2 - x1) as f64);
+                let dir = if y2f > y1f { 1 } else { -1 };
+                xs.push((x1 as f64 + t * (x2 - x1) as f64, dir));
             }
         }
         if xs.len() < 2 {
             continue;
         }
-        xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let mut i = 0;
-        while i + 1 < xs.len() {
-            let a = xs[i].round() as i32;
-            let b = xs[i + 1].round() as i32;
-            fill_rect_impl(data, w, h, a, yy, b - a + 1, 1, color);
-            i += 2;
+        xs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        // nonzero：累计环绕数；even-odd：只看奇偶。默认 nonzero，与 SVG / 字体轮廓一致。
+        let mut winding = 0i32;
+        let mut span_start: Option<i32> = None;
+        for (xf, dir) in xs.iter() {
+            let inside_before = if nonzero { winding != 0 } else { winding % 2 != 0 };
+            winding += if nonzero { *dir } else { 1 };
+            let inside_after = if nonzero { winding != 0 } else { winding % 2 != 0 };
+            let x = xf.round() as i32;
+            if !inside_before && inside_after {
+                span_start = Some(x);
+            } else if inside_before && !inside_after {
+                if let Some(a) = span_start.take() {
+                    fill_rect_impl(data, w, h, a, yy, x - a, 1, color);
+                }
+            }
         }
     }
 }
@@ -227,13 +237,13 @@ pub fn gradient_impl(
     if steps <= 0 {
         return;
     }
-    let r1 = (c1 & 0xFF) as i32;
+    let r1 = ((c1 >> 16) & 0xFF) as i32;
     let g1 = ((c1 >> 8) & 0xFF) as i32;
-    let b1 = ((c1 >> 16) & 0xFF) as i32;
+    let b1 = (c1 & 0xFF) as i32;
     let a1 = ((c1 >> 24) & 0xFF) as i32;
-    let r2 = (c2 & 0xFF) as i32;
+    let r2 = ((c2 >> 16) & 0xFF) as i32;
     let g2 = ((c2 >> 8) & 0xFF) as i32;
-    let b2 = ((c2 >> 16) & 0xFF) as i32;
+    let b2 = (c2 & 0xFF) as i32;
     let a2 = ((c2 >> 24) & 0xFF) as i32;
     for i in 0..steps {
         let t = if steps <= 1 { 0.0 } else { i as f64 / (steps - 1) as f64 };
@@ -241,7 +251,7 @@ pub fn gradient_impl(
         let g = (g1 as f64 + (g2 - g1) as f64 * t) as u8;
         let b = (b1 as f64 + (b2 - b1) as f64 * t) as u8;
         let a = (a1 as f64 + (a2 - a1) as f64 * t) as u8;
-        let color = ((a as u32) << 24) | ((b as u32) << 16) | ((g as u32) << 8) | (r as u32);
+        let color = ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
         if vertical {
             fill_rect_impl(data, w, h, x, y + i, rw, 1, color);
         } else {
@@ -367,7 +377,8 @@ impl Canvas {
         }
         with_pixels(self.addr, self.len, |data| {
             let i = idx(x, y, w);
-            (data[i] as u32) | ((data[i + 1] as u32) << 8) | ((data[i + 2] as u32) << 16) | ((data[i + 3] as u32) << 24)
+            let a = data[i + 3] as u32;
+            (a << 24) | ((data[i] as u32) << 16) | ((data[i + 1] as u32) << 8) | (data[i + 2] as u32)
         })
     }
 
@@ -401,9 +412,13 @@ impl Canvas {
         self.ring(cx, cy, r, color, width)
     }
 
-    fn polygon(&self, points: Vec<(i32, i32)>, color: u32) -> PyResult<()> {
+    #[pyo3(signature = (points, color, fill_rule="nonzero"))]
+    fn polygon(&self, points: Vec<(i32, i32)>, color: u32, fill_rule: &str) -> PyResult<()> {
         let (w, h) = (self.width, self.height);
-        with_pixels(self.addr, self.len, |data| polygon_impl(data, w, h, &points, color))
+        let nonzero = !matches!(fill_rule, "evenodd" | "even-odd");
+        with_pixels(self.addr, self.len, |data| {
+            polygon_impl(data, w, h, &points, color, nonzero)
+        })
     }
 
     #[pyo3(signature = (points, color, width=1, closed=false))]
@@ -481,7 +496,7 @@ impl Canvas {
 
 #[pyfunction]
 fn rgb(r: u8, g: u8, b: u8, a: u8) -> u32 {
-    ((a as u32) << 24) | ((b as u32) << 16) | ((g as u32) << 8) | (r as u32)
+    ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
 }
 
 #[pyfunction]
@@ -498,23 +513,15 @@ fn parse_color(value: &str) -> PyResult<u32> {
             let g = ((v >> 4) & 0xF) as u32;
             let b = (v & 0xF) as u32;
             let (r, g, b) = (r * 17, g * 17, b * 17);
-            Ok((255 << 24) | (b << 16) | (g << 8) | r)
+            Ok((255 << 24) | (r << 16) | (g << 8) | b)
         }
         6 => {
             let v = parse(s)?;
-            let r = v >> 16 & 0xFF;
-            let g = v >> 8 & 0xFF;
-            let b = v & 0xFF;
-            Ok((255 << 24) | (b << 16) | (g << 8) | r)
+            Ok((255 << 24) | v)
         }
         8 => {
-            // #AARRGGBB（CSS 风格）-> 内部 0xAABBGGRR
-            let v = parse(s)?;
-            let a = (v >> 24) & 0xFF;
-            let r = (v >> 16) & 0xFF;
-            let g = (v >> 8) & 0xFF;
-            let b = v & 0xFF;
-            Ok((a << 24) | (b << 16) | (g << 8) | r)
+            // #AARRGGBB（CSS 风格）与内部表示完全一致
+            Ok(parse(s)?)
         }
         _ => Err(PyValueError::new_err(format!("非法颜色: {value}"))),
     }
@@ -550,7 +557,18 @@ mod tests {
     fn polygon_zero_height_does_not_underflow() {
         let mut buf = [0u8; 64];
         // h == 0 时 h-1 会下溢为 i32::MAX，修复前会 panic / 越界。
-        polygon_impl(&mut buf, 2, 0, &[(0, 0), (1, 0), (0, 1)], 0xFFFF_FFFF);
-        polygon_impl(&mut buf, 0, 0, &[(0, 0), (1, 0), (0, 1)], 0xFFFF_FFFF);
+        polygon_impl(&mut buf, 2, 0, &[(0, 0), (1, 0), (0, 1)], 0xFFFF_FFFF, true);
+        polygon_impl(&mut buf, 0, 0, &[(0, 0), (1, 0), (0, 1)], 0xFFFF_FFFF, true);
+    }
+
+    #[test]
+    fn polygon_nonzero_fills_self_intersection() {
+        // 两个同向重叠矩形（nonzero 下应全部填充，even-odd 会挖空重叠区）。
+        let mut buf = [0u8; 16 * 16 * 4];
+        let pts = [(2, 2), (12, 2), (12, 12), (2, 12), (6, 6), (14, 6), (14, 14), (6, 14)];
+        polygon_impl(&mut buf, 16, 16, &pts, 0xFFFF_FFFF, true);
+        // (10,10) 位于两个矩形重叠区，nonzero 下应被填充。
+        let i = (10 * 16 + 10) * 4;
+        assert_eq!(buf[i], 255, "nonzero 重叠区应填充");
     }
 }

@@ -14,6 +14,8 @@ crate-type = ["cdylib", "rlib"]
 pyo3 = { version = "0.30", features = ["extension-module", "abi3-py310"] }
 # 只用它取字形轮廓（同时支持 glyf 与 CFF/CFF2），光栅化在 font.rs 里自实现
 ttf-parser = "0.25"
+# 无字体时的兜底度量：正确处理 CJK(2) / emoji(2) / 组合符号(0)
+unicode-width = "0.2"
 
 [profile.release]
 lto = true

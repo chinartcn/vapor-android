@@ -30,7 +30,8 @@ public class RendererActivity extends Activity implements SurfaceHolder.Callback
         System.loadLibrary("vapor");
     }
 
-    private native void nativeInit(Surface surface, int w, int h, String appDir, String privateDir);
+    private native void nativeInit(Surface surface, int w, int h, float density,
+                                   String appDir, String privateDir);
     private native void nativeResize(int w, int h);
     private native void nativeRender();
     private native void nativeShutdown();
@@ -246,6 +247,7 @@ public class RendererActivity extends Activity implements SurfaceHolder.Callback
         int h = holder.getSurfaceFrame().height();
         File files = getFilesDir();
         nativeInit(surface, w, h,
+                   getResources().getDisplayMetrics().density,
                    new File(files, "app").getAbsolutePath(),
                    files.getAbsolutePath());
         running = true;

@@ -12,6 +12,14 @@
  *   2. 全功能函数表 VaporApi：C 扩展 init 时拿到整张表，从而"啥都能调"。
  *   3. 扩展加载：C 扩展 dlopen + init(VaporApi*)，Python 扩展走嵌入式解释器。
  *   4. 所有字符串为 UTF-8，以 NUL 结尾；缓冲区由调用方按契约释放。
+ *
+ * 颜色与像素契约（v1）：
+ *   - 对外颜色参数（vapor_fb_clear / vapor_set_bg_color / 扩展绘制）统一为
+ *     0xAARRGGBB（sRGB、非预乘），与 CSS / Android Color.argb() 一致。
+ *   - 帧缓冲始终为 RGBA8888：内存字节序为 R,G,B,A，stride = width * 4，
+ *     每行 4 字节对齐，因此 glTexSubImage2D 可使用默认 GL_UNPACK_ALIGNMENT=4。
+ *   - vapor_fb_lock() 返回的 pixels 在下次 vapor_fb_unlock() 之前有效；锁定期间
+ *     vapor_fb_resize() 返回 VAPOR_ERR_STATE，不会重新分配缓冲（避免悬垂指针）。
  */
 #ifndef VAPOR_ABI_H
 #define VAPOR_ABI_H
@@ -40,8 +48,8 @@ typedef enum VaporStatus {
 } VaporStatus;
 
 typedef enum VaporPixelFormat {
-    VAPOR_FMT_RGBA8888 = 0,   /* 默认，每像素 4 字节 */
-    VAPOR_FMT_RGB565   = 1,
+    VAPOR_FMT_RGBA8888 = 0,   /* 唯一支持的格式，每像素 4 字节（R,G,B,A） */
+    /* 1 预留给 v2 的 RGB565，v1 不实现，勿使用 */
 } VaporPixelFormat;
 
 typedef enum VaporEventType {
@@ -76,6 +84,8 @@ typedef struct VaporConfig {
 } VaporConfig;
 
 /* 共享内存帧缓冲描述。pixels 指向 Rust 持有的 RGBA8888 缓冲，stride 为字节数。
+ * 颜色参数为 0xAARRGGBB；像素内存字节序为 R,G,B,A。
+ * pixels 指针从 vapor_fb_lock() 起有效，直到 vapor_fb_unlock()；锁存期间 resize 会被拒绝。
  * fd 为可选的 ashmem 文件描述符（-1 表示同进程共享，不做跨进程映射）。*/
 typedef struct VaporFramebuffer {
     uint8_t*    pixels;         /* 可写像素区 */

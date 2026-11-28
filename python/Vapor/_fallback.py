@@ -305,7 +305,7 @@ def stats():
 # ---------------------------------------------------------------------------
 
 def rgb(r, g, b, a=255):
-    return ((a & 255) << 24) | ((b & 255) << 16) | ((g & 255) << 8) | (r & 255)
+    return ((a & 255) << 24) | ((r & 255) << 16) | ((g & 255) << 8) | (b & 255)
 
 
 def parse_color(value: str) -> int:
@@ -360,7 +360,7 @@ class Canvas:
         if x < 0 or y < 0 or x >= self._w or y >= self._h:
             return
         i = (y * self._w + x) * 4
-        r, g, b, a = color & 255, (color >> 8) & 255, (color >> 16) & 255, (color >> 24) & 255
+        r, g, b, a = (color >> 16) & 255, (color >> 8) & 255, color & 255, (color >> 24) & 255
         buf = self.buf
         if a == 255:
             buf[i] = r
@@ -382,7 +382,7 @@ class Canvas:
             return 0
         i = (y * self._w + x) * 4
         buf = self.buf
-        return buf[i] | (buf[i + 1] << 8) | (buf[i + 2] << 16) | (buf[i + 3] << 24)
+        return (buf[i + 3] << 24) | (buf[i] << 16) | (buf[i + 1] << 8) | buf[i + 2]
 
     def clear(self, color):
         self.fill_rect(0, 0, self._w, self._h, color)
@@ -395,7 +395,7 @@ class Canvas:
         x1, y1 = min(self._w, x + w), min(self._h, y + h)
         if x0 >= x1 or y0 >= y1:
             return
-        r, g, b, a = color & 255, (color >> 8) & 255, (color >> 16) & 255, (color >> 24) & 255
+        r, g, b, a = (color >> 16) & 255, (color >> 8) & 255, color & 255, (color >> 24) & 255
         buf = self.buf
         if a == 255:
             row = bytes((r, g, b, 255)) * (x1 - x0)
@@ -462,10 +462,11 @@ class Canvas:
     def circle(self, cx, cy, r, color, width=1):
         self.ring(cx, cy, r, color, width)
 
-    def polygon(self, points, color):
+    def polygon(self, points, color, fill_rule="nonzero"):
         pts = [(int(x), int(y)) for x, y in points]
         if len(pts) < 3:
             return
+        nonzero = fill_rule not in ("evenodd", "even-odd")
         ys = [p[1] for p in pts]
         y0, y1 = max(0, min(ys)), min(self._h - 1, max(ys))
         n = len(pts)
@@ -477,13 +478,22 @@ class Canvas:
                 x2, y2p = pts[(i + 1) % n]
                 if (y1p <= scan < y2p) or (y2p <= scan < y1p):
                     t = (scan - y1p) / (y2p - y1p)
-                    xs.append(x1 + t * (x2 - x1))
+                    xs.append((x1 + t * (x2 - x1), 1 if y2p > y1p else -1))
+            if len(xs) < 2:
+                continue
             xs.sort()
-            i = 0
-            while i + 1 < len(xs):
-                a, b = int(round(xs[i])), int(round(xs[i + 1]))
-                self.fill_rect(a, yy, b - a + 1, 1, color)
-                i += 2
+            winding = 0
+            start = None
+            for xf, direction in xs:
+                before = (winding != 0) if nonzero else (winding % 2 != 0)
+                winding += direction if nonzero else 1
+                after = (winding != 0) if nonzero else (winding % 2 != 0)
+                x = int(round(xf))
+                if not before and after:
+                    start = x
+                elif before and not after and start is not None:
+                    self.fill_rect(start, yy, x - start, 1, color)
+                    start = None
 
     def polyline(self, points, color, width=1, closed=False):
         pts = [(int(x), int(y)) for x, y in points]
@@ -526,5 +536,5 @@ class Canvas:
                 si = (yy * int(sw) + xx) * 4
                 a = src[si + 3] * alpha // 255
                 if a:
-                    color = src[si] | (src[si + 1] << 8) | (src[si + 2] << 16) | (a << 24)
+                    color = (a << 24) | (src[si] << 16) | (src[si + 1] << 8) | src[si + 2]
                     self._put(int(dx) + xx, int(dy) + yy, color)

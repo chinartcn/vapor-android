@@ -46,8 +46,8 @@ _view: memoryview | None = None
 # ---------------------------------------------------------------------------
 
 def rgb(r: int, g: int, b: int, a: int = 255) -> int:
-    """打包为 0xAABBGGRR，与帧缓冲字节序一致。"""
-    return ((a & 255) << 24) | ((b & 255) << 16) | ((g & 255) << 8) | (r & 255)
+    """打包为 0xAARRGGBB，与 CSS / Android Color.argb() 一致。"""
+    return ((a & 255) << 24) | ((r & 255) << 16) | ((g & 255) << 8) | (b & 255)
 
 
 def abi_version() -> int:
@@ -141,9 +141,9 @@ def pixel(x: int, y: int, color: int) -> None:
         return
     i = (y * fb.width + x) * 4
     v = _view if _view is not None else framebuffer()
-    v[i] = color & 255
+    v[i] = (color >> 16) & 255
     v[i + 1] = (color >> 8) & 255
-    v[i + 2] = (color >> 16) & 255
+    v[i + 2] = color & 255
     v[i + 3] = (color >> 24) & 255
 
 
@@ -151,7 +151,7 @@ def rect(x: int, y: int, w: int, h: int, color: int) -> None:
     fb = _fb or _lock()
     v = _view if _view is not None else framebuffer()
     width, height = fb.width, fb.height
-    r, g, b, a = color & 255, (color >> 8) & 255, (color >> 16) & 255, (color >> 24) & 255
+    r, g, b, a = (color >> 16) & 255, (color >> 8) & 255, color & 255, (color >> 24) & 255
     x0, y0 = max(0, x), max(0, y)
     x1, y1 = min(width, x + w), min(height, y + h)
     row = bytes((r, g, b, a))

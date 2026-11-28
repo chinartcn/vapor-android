@@ -26,6 +26,8 @@ pub struct State {
     /// `vapor_fb_lock` 与 `vapor_fb_unlock` 之间的互斥标记。
     /// 加锁期间禁止 resize（会重新分配 Vec 并让已交出的指针悬垂）。
     pub fb_locked: bool,
+    /// 设备像素密度（dp -> px 的倍数）。帧缓冲用逻辑尺寸，GL 视口用物理尺寸。
+    pub density: f32,
 }
 
 impl Default for State {
@@ -36,7 +38,7 @@ impl Default for State {
             height: DEFAULT_H,
             framebuffer: vec![0; (DEFAULT_W * DEFAULT_H * 4) as usize],
             generation: 0,
-            bg_color: 0xFF101418, // AABBGGRR 小端视角：深灰蓝
+            bg_color: 0xFF101418, // 0xAARRGGBB：深灰蓝
             title: "Vapor".into(),
             events: VecDeque::with_capacity(128),
             app_dir: String::new(),
@@ -44,6 +46,7 @@ impl Default for State {
             external_dir: String::new(),
             python_ready: false,
             fb_locked: false,
+            density: 1.0,
         }
     }
 }
@@ -108,8 +111,31 @@ pub fn external_dir_ptr() -> *const std::os::raw::c_char {
     path_ptr(2)
 }
 
-pub fn resize_fb(w: i32, h: i32) -> i32 {
-    if w <= 0 || h <= 0 || (w as i64) * (h as i64) > 16_777_216 {
+/// 设置设备像素密度（Android DisplayMetrics.density）；限制在合理区间避免异常输入。
+pub fn set_density(d: f32) {
+    let d = if d.is_finite() { d.clamp(0.5, 4.0) } else { 1.0 };
+    state().lock().unwrap().density = d;
+}
+
+pub fn density() -> f32 {
+    state().lock().unwrap().density
+}
+
+/// 物理像素 -> 逻辑像素（帧缓冲尺寸 / 触摸坐标）。
+pub fn to_logical(v: f32) -> f32 {
+    let d = density();
+    if d > 0.0 { v / d } else { v }
+}
+
+/// 按当前 density 把物理尺寸换算为帧缓冲逻辑尺寸并 resize。
+pub fn resize_fb_physical(w: i32, h: i32) -> i32 {
+    let d = density();
+    let lw = ((w as f32 / d).round() as i32).max(1);
+    let lh = ((h as f32 / d).round() as i32).max(1);
+    resize_fb(lw, lh)
+}
+
+pub fn resize_fb(w: i32, h: i32) -> i32 {    if w <= 0 || h <= 0 || (w as i64) * (h as i64) > 16_777_216 {
         return vapor_abi::VAPOR_ERR_ARG;
     }
     let mut s = state().lock().unwrap();

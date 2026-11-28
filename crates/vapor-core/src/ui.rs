@@ -7,14 +7,14 @@
 use crate::state::State;
 use vapor_abi::VAPOR_OK;
 
-/// 颜色为 0xAABBGGRR（与本帧缓冲 RGBA8888 字节序对应）。
+/// 颜色为 0xAARRGGBB（与 CSS / Android 一致）。
 fn put_px(buf: &mut [u8], w: i32, h: i32, x: i32, y: i32, color: u32) {
     if x < 0 || y < 0 || x >= w || y >= h { return; }
     let idx = ((y as usize) * (w as usize) + (x as usize)) * 4;
     if idx + 3 >= buf.len() { return; }
-    buf[idx]     = (color & 0xFF) as u8;         // R
+    buf[idx]     = ((color >> 16) & 0xFF) as u8; // R
     buf[idx + 1] = ((color >> 8) & 0xFF) as u8;  // G
-    buf[idx + 2] = ((color >> 16) & 0xFF) as u8; // B
+    buf[idx + 2] = (color & 0xFF) as u8;         // B
     buf[idx + 3] = ((color >> 24) & 0xFF) as u8; // A
 }
 

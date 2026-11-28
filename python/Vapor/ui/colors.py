@@ -15,12 +15,12 @@ def rgb(r, g, b, a=255) -> int:
 
 
 def color(value, default=None) -> int:
-    """把颜色（int / #hex / rgb() / 命名色）转成 0xAABBGGRR。"""
+    """把颜色（int / #hex / rgb() / 命名色）转成 0xAARRGGBB。"""
     if value is None:
         return default if default is not None else 0
     if isinstance(value, int):
         if value <= 0xFFFFFF:  # 纯 RGB
-            return 0xFF000000 | ((value & 0xFF) << 16) | (((value >> 8) & 0xFF) << 8) | ((value >> 16) & 0xFF)
+            return 0xFF000000 | (value & 0xFFFFFF)
         return value & 0xFFFFFFFF
     if isinstance(value, (tuple, list)):
         parts = list(value) + [255] * (4 - len(value))

@@ -382,9 +382,9 @@ fn blend(data: &mut [u8], w: i32, h: i32, x: i32, y: i32, color: u32, coverage: 
         return;
     }
     let inv = 255 - alpha;
-    let r = (color & 0xFF) as u32;
+    let r = ((color >> 16) & 0xFF) as u32;
     let g = ((color >> 8) & 0xFF) as u32;
-    let b = ((color >> 16) & 0xFF) as u32;
+    let b = (color & 0xFF) as u32;
     data[i] = ((r * alpha + data[i] as u32 * inv) / 255) as u8;
     data[i + 1] = ((g * alpha + data[i + 1] as u32 * inv) / 255) as u8;
     data[i + 2] = ((b * alpha + data[i + 2] as u32 * inv) / 255) as u8;

@@ -4,13 +4,24 @@
 //! 保证布局层可以在没有字体文件的情况下算出行高与折行点。
 
 use pyo3::prelude::*;
+use unicode_width::UnicodeWidthChar;
 
 /// 单个字符的宽度（以字号 size 为 1em 的倍数）。
+///
+/// 这是**无字体时的估算兜底**；布局层安装了真实字体时应优先使用
+/// `Font::text_width`（见 python/Vapor/ui/text.py）。Latin 沿用视觉比例，
+/// 非拉丁字符用 unicode-width 判定：CJK/emoji 占 1em，组合符号/ZWJ 为 0。
 fn char_em(c: char) -> f64 {
     let cp = c as u32;
-    // CJK / 全角标点 / emoji：按 1em
+    // 组合符号 / ZWJ / 变体选择符不占宽度（emoji 序列不会被拆出额外宽度）。
+    if cp >= 0x200B && c.width() == Some(0) {
+        return 0.0;
+    }
     if cp >= 0x2E80 {
-        return 1.0;
+        return match c.width() {
+            Some(0) => 0.0,
+            _ => 1.0,
+        };
     }
     match c {
         ' ' => 0.28,
@@ -22,6 +33,11 @@ fn char_em(c: char) -> f64 {
         '0'..='9' => 0.56,
         _ => 0.55,
     }
+}
+
+/// 是否把该字符当作可独立折行的块（CJK / emoji 等全角字符）。
+fn is_wide(c: char) -> bool {
+    c as u32 >= 0x2E80 || c.width() == Some(2)
 }
 
 #[pyfunction]
@@ -65,7 +81,7 @@ pub fn wrap_text(text: &str, size: f64, max_width: f64, letter_spacing: f64) -> 
         let mut i = 0usize;
         while i < chars.len() {
             let c = chars[i];
-            let cjk = (c as u32) >= 0x2E80;
+            let cjk = is_wide(c);
             let mut token = String::new();
             if cjk || c == ' ' {
                 token.push(c);
@@ -73,7 +89,7 @@ pub fn wrap_text(text: &str, size: f64, max_width: f64, letter_spacing: f64) -> 
             } else {
                 while i < chars.len() {
                     let ch = chars[i];
-                    if ch == ' ' || (ch as u32) >= 0x2E80 {
+                    if ch == ' ' || is_wide(ch) {
                         break;
                     }
                     token.push(ch);

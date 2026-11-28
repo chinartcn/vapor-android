@@ -75,11 +75,8 @@ def color_value(value, default=None):
 
 
 def _pack(rgb: int, alpha: int = 255) -> int:
-    """0xRRGGBB + alpha -> Vapor 的 0xAABBGGRR。"""
-    r = (rgb >> 16) & 0xFF
-    g = (rgb >> 8) & 0xFF
-    b = rgb & 0xFF
-    return ((alpha & 0xFF) << 24) | (b << 16) | (g << 8) | r
+    """0xRRGGBB + alpha -> 0xAARRGGBB。"""
+    return ((alpha & 0xFF) << 24) | (rgb & 0xFFFFFF)
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import math
+import unicodedata
 
 FALLBACK = True
 
@@ -384,7 +385,11 @@ def path_segment_count(d):
 # ---------------------------------------------------------------------------
 
 def _char_em(c):
-    if ord(c) >= 0x2E80:
+    o = ord(c)
+    # 组合符号 / 零宽连接符 / 变体选择符不占宽度
+    if o in (0x200B, 0x200C, 0x200D, 0xFE0E, 0xFE0F) or unicodedata.combining(c):
+        return 0.0
+    if o >= 0x2E80:
         return 1.0
     if c == " ":
         return 0.28
@@ -416,6 +421,10 @@ def line_height(size):
     return size * 1.3
 
 
+def _is_wide(c):
+    return ord(c) >= 0x2E80 or unicodedata.east_asian_width(c) in ("W", "F")
+
+
 def wrap_text(text, size, max_width, letter_spacing=0.0):
     if max_width <= 0:
         return [text]
@@ -429,12 +438,12 @@ def wrap_text(text, size, max_width, letter_spacing=0.0):
         i = 0
         while i < len(para):
             c = para[i]
-            if ord(c) >= 0x2E80 or c == " ":
+            if _is_wide(c) or c == " ":
                 token = c
                 i += 1
             else:
                 token = ""
-                while i < len(para) and para[i] != " " and ord(para[i]) < 0x2E80:
+                while i < len(para) and para[i] != " " and not _is_wide(para[i]):
                     token += para[i]
                     i += 1
             tw = text_width(token, size, letter_spacing)

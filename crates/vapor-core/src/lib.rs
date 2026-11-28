@@ -158,9 +158,9 @@ pub extern "C" fn vapor_fb_clear(rgba: u32) -> i32 {
         Ok(g) => g,
         Err(_) => return VAPOR_ERR_STATE,
     };
-    let r = (rgba & 0xFF) as u8;
+    let r = ((rgba >> 16) & 0xFF) as u8;
     let g = ((rgba >> 8) & 0xFF) as u8;
-    let b = ((rgba >> 16) & 0xFF) as u8;
+    let b = (rgba & 0xFF) as u8;
     let a = ((rgba >> 24) & 0xFF) as u8;
     for px in s.framebuffer.chunks_exact_mut(4) {
         px[0] = r; px[1] = g; px[2] = b; px[3] = a;
@@ -357,6 +357,7 @@ pub extern "C" fn Java_com_vapor_RendererActivity_nativeInit(
     surface: *mut c_void,
     w: i32,
     h: i32,
+    density: f32,
     app_dir: *const c_char,
     private_dir: *const c_char,
 ) {
@@ -377,13 +378,17 @@ pub extern "C" fn Java_com_vapor_RendererActivity_nativeInit(
     }
 
     // 2) 从 Surface 取 ANativeWindow 并初始化 EGL/GLES
+    // 帧缓冲使用逻辑尺寸（物理 / density），GL 视口使用物理尺寸，由 GPU 缩放。
+    state::set_density(density);
+    let lw = ((w as f32 / state::density()).round() as i32).max(1);
+    let lh = ((h as f32 / state::density()).round() as i32).max(1);
     unsafe {
         let window = android_native_window_from_surface(env, surface);
         if !window.is_null() {
             renderer::init_from_window(window);
         }
     }
-    state::resize_fb(w, h);
+    state::resize_fb(lw, lh);
     // 3) 设置路径（供 bundled_python_home 定位解压后的 Python 运行时）
     // 关键修复：app_dir / private_dir 是 JNI jstring（jobject 指针），必须用
     // GetStringUTFChars 转换；直接当 char* 读会得到空串，导致 Python 路径错乱。
@@ -399,10 +404,13 @@ pub extern "C" fn Java_com_vapor_RendererActivity_nativeInit(
         app_dir: app_c.as_ptr(),
         private_dir: private_c.as_ptr(),
         external_dir: std::ptr::null(),
-        width: w,
-        height: h,
+        width: lw,
+        height: lh,
         enable_python: 1,
     };
+    log::log_msg(log::LOG_INFO, &format!(
+        "nativeInit 物理 {w}x{h} density={density} -> 逻辑 {lw}x{lh}"
+    ));
     vapor_init(&cfg);
 }
 
@@ -411,7 +419,8 @@ pub extern "C" fn Java_com_vapor_RendererActivity_nativeInit(
 #[allow(non_snake_case)]
 pub extern "C" fn Java_com_vapor_RendererActivity_nativeResize(
     _env: *mut c_void, _thiz: *mut c_void, w: i32, h: i32) {
-    state::resize_fb(w, h);
+    // Surface 尺寸是物理像素；按已保存的 density 换算成逻辑帧缓冲尺寸。
+    state::resize_fb_physical(w, h);
 }
 
 #[cfg(target_os = "android")]
@@ -425,6 +434,7 @@ pub extern "C" fn Java_com_vapor_RendererActivity_nativeRender(_env: *mut c_void
 #[no_mangle]
 #[allow(non_snake_case)]
 pub extern "C" fn Java_com_vapor_RendererActivity_nativeShutdown(_env: *mut c_void, _thiz: *mut c_void) {
+    renderer::destroy();
     vapor_shutdown();
 }
 
@@ -511,10 +521,10 @@ pub extern "C" fn Java_com_vapor_RendererActivity_nativeTouch(
     };
     push_event(VaporEvent {
         event_type,
-        x: x as i32,
-        y: y as i32,
-        x2: x2 as i32,
-        y2: y2 as i32,
+        x: state::to_logical(x).round() as i32,
+        y: state::to_logical(y).round() as i32,
+        x2: state::to_logical(x2).round() as i32,
+        y2: state::to_logical(y2).round() as i32,
         button: pointer_id,
         action: mapped,
         keycode: pointer_count,
@@ -535,8 +545,8 @@ pub extern "C" fn Java_com_vapor_RendererActivity_nativeWheel(
 ) {
     push_event(VaporEvent {
         event_type: EVT_WHEEL,
-        x: dx as i32,
-        y: dy as i32,
+        x: state::to_logical(dx).round() as i32,
+        y: state::to_logical(dy).round() as i32,
         timestamp_ms: now_ms(),
         ..Default::default()
     });

@@ -21,7 +21,7 @@ pub const VAPOR_ERR_PERMISSION: i32 = -5;
 pub const VAPOR_NO_EVENT: i32 = 1;
 
 pub const FMT_RGBA8888: i32 = 0;
-pub const FMT_RGB565: i32 = 1;
+/* 1 预留给 v2 的 RGB565，v1 不实现。 */
 
 pub const EVT_NONE: i32 = 0;
 pub const EVT_MOTION: i32 = 1;
