@@ -77,7 +77,8 @@ def _text(r, getter, style, color_getter, align=None, grow=None):
 
 def _morph_shape(canvas, box, morph, color):
     if box.w > 0 and box.h > 0:
-        canvas.round_rect(box.x, box.y, box.w, box.h, morph.radius, color)
+        canvas.round_rect(box.x, box.y, box.w, box.h,
+                          morph.radius(min(box.w, box.h)), color)
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +212,7 @@ class MdAppIcon(Component):
         r.bind_attr(root, "w", lambda: size)
 
         tile = r.element("view", {"w": size, "h": size})
-        morph = ShapeMorph(rest="large", pressed="extraLarge")
+        morph = ShapeMorph(MorphSpec("large", "extraLarge"))
         tile.extra["shape_morph"] = morph
 
         def container_color():
@@ -244,13 +245,13 @@ class MdAppIcon(Component):
         state = {"moved": False}
 
         def on_press(_ev):
-            morph.set_pressed(True)
+            morph.press()
             box = getattr(tile, "box", None)
             if box is not None and box.w > 0:
                 queue_dirty(box.x, box.y, box.w, box.h)
 
         def on_release(_ev):
-            morph.set_pressed(False)
+            morph.release()
             box = getattr(tile, "box", None)
             if box is not None and box.w > 0:
                 queue_dirty(box.x, box.y, box.w, box.h)
@@ -421,7 +422,7 @@ class MdTaskCard(Component):
         r.bind_attr(root, "radius", lambda: float(get_shape("large")))
         r.bind_attr(root, "bg", lambda: theme_color("surfaceContainerHigh"))
 
-        morph = ShapeMorph(rest="large", pressed="extraLarge")
+        morph = ShapeMorph(MorphSpec("large", "extraLarge"))
         root.extra["shape_morph"] = morph
 
         def content_color():
@@ -456,13 +457,13 @@ class MdTaskCard(Component):
                 queue_dirty(box.x, box.y, box.w, box.h)
 
         def on_press(_ev):
-            morph.set_pressed(True)
+            morph.press()
             ripple = root.extra.get("ripple")
             if ripple is not None:
                 ripple.start(0, 0)
 
         def on_release(_ev):
-            morph.set_pressed(False)
+            morph.release()
             ripple = root.extra.get("ripple")
             if ripple is not None:
                 ripple.stop()

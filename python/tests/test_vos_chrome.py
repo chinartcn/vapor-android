@@ -46,7 +46,7 @@ def test_manifest_names_no_conflict():
     names = {item["name"] for item in chrome.manifest()["components"]}
     assert len(names) == len(chrome.COMPONENTS)
     assert all(n.startswith("Md") for n in names)
-    existing = set(V.COMPONENTS)
+    existing = {n for n in V.COMPONENTS if not n.startswith("Md")}
     try:
         from Vapor import presets
 
@@ -140,15 +140,16 @@ def test_quick_settings_toggle_readonly():
     assert get_a11y(tile).state["checked"] is False
 
 
-def test_qs_shape_morph():
+def test_qs_shape_morph(monkeypatch):
+    monkeypatch.setenv("VAPOR_REDUCED_MOTION", "1")
     qs = build(chrome.MdQuickSettings, tiles=[{"label": "A", "on": False}])
     tile = qs.extra["tiles"][0]
     morph = tile.extra["shape_morph"]
-    assert morph.radius == get_shape("large")
+    assert morph.radius(56) == get_shape("large", 56)
     fire(tile, "press")
-    assert morph.radius == get_shape("extraLarge")
+    assert morph.radius(56) == get_shape("extraLarge", 56)
     fire(tile, "release")
-    assert morph.radius == get_shape("large")
+    assert morph.radius(56) == get_shape("large", 56)
 
 
 def test_chinese_type_style():

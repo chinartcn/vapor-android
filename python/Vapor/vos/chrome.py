@@ -42,63 +42,51 @@ _SLOP = 8.0  # 判定“拖动而非点击”的最小位移
 # ---------------------------------------------------------------------------
 
 try:  # 文档 1 的形态变形接口
-    from ..vos_base.shape_morph import (  # type: ignore
-        MorphSpec, ShapeMorph, morph_shape_paint,
-    )
-except Exception:  # pragma: no cover - 优先使用权威实现
+    from ..vos_base.shape_morph import MorphSpec, ShapeMorph  # type: ignore
+except Exception:  # pragma: no cover - 文档 1 未合入时的等价兜底
     class MorphSpec:
-        __slots__ = ("rest", "pressed")
+        __slots__ = ("rest", "pressed", "speed")
 
-        def __init__(self, rest="large", pressed="extraLarge"):
+        def __init__(self, rest, pressed, speed="fast"):
             self.rest = rest
             self.pressed = pressed
+            self.speed = speed
 
     class ShapeMorph:
-        """圆角在 rest / pressed 两个形状之间按进度插值。"""
+        """与 vos_base 同签名的极简兜底：press/release 瞬时切换。"""
 
-        __slots__ = ("spec", "progress")
+        __slots__ = ("spec", "_pressed")
 
-        def __init__(self, spec=None, rest=None, pressed=None):
-            if spec is None:
-                spec = MorphSpec(rest or "large", pressed or "extraLarge")
+        def __init__(self, spec):
             self.spec = spec
-            self.progress = 0.0
+            self._pressed = False
 
-        @staticmethod
-        def _radius(name):
+        @property
+        def active(self):
+            return False
+
+        def press(self, now=None):
+            self._pressed = True
+
+        def release(self, now=None):
+            self._pressed = False
+
+        def radius(self, shortest_side, now=None):
+            from ..theme import get_shape as _shape
+
+            name = self.spec.pressed if self._pressed else self.spec.rest
             try:
-                return float(get_shape(name))
+                return float(_shape(name, shortest_side))
             except Exception:
                 return 16.0
-
-        @property
-        def rest_radius(self):
-            return self._radius(self.spec.rest)
-
-        @property
-        def pressed_radius(self):
-            return self._radius(self.spec.pressed)
-
-        @property
-        def radius(self):
-            t = max(0.0, min(1.0, self.progress))
-            return self.rest_radius + (self.pressed_radius - self.rest_radius) * t
-
-        def set_pressed(self, on):
-            self.progress = 1.0 if on else 0.0
-
-    def morph_shape_paint(canvas, box, morph, color):
-        if box.w <= 0 or box.h <= 0:
-            return
-        canvas.round_rect(box.x, box.y, box.w, box.h, morph.radius, color)
 
 
 try:  # 文档 1 的中文字阶接口
     from ..vos_base.cjk import type_style  # type: ignore
 except Exception:  # pragma: no cover
-    def type_style(name, lang="zh"):
+    def type_style(name, emphasized=False, lang="zh"):
         factor = 1.07 if str(lang).lower().startswith("zh") else 1.0
-        return get_type_style(name, lang_height_factor=factor)
+        return get_type_style(name, emphasized=emphasized, lang_height_factor=factor)
 
 
 # ---------------------------------------------------------------------------
@@ -465,7 +453,7 @@ class MdQuickSettings(Component):
             "dir": "column", "align": "start", "justify": "center",
             "grow": 1, "h": 56, "padding": [12, 12], "gap": 4,
         })
-        morph = ShapeMorph(rest="large", pressed="extraLarge")
+        morph = ShapeMorph(MorphSpec("large", "extraLarge"))
         node.extra["shape_morph"] = morph
 
         def container_color():
@@ -475,8 +463,11 @@ class MdQuickSettings(Component):
             return theme_color("onSecondaryContainer") if on else theme_color("onSurfaceVariant")
 
         def paint(canvas, box):
-            morph_shape_paint(canvas, box, morph, container_color())
-            paint_state_layer(canvas, node, props_stub, box, morph.radius, content_color())
+            if box.w > 0 and box.h > 0:
+                canvas.round_rect(box.x, box.y, box.w, box.h,
+                                  morph.radius(min(box.w, box.h)), container_color())
+            paint_state_layer(canvas, node, props_stub, box,
+                              morph.radius(min(box.w, box.h)), content_color())
             paint_ripple(canvas, node, box)
 
         props_stub = {"disabled": False}
@@ -497,13 +488,13 @@ class MdQuickSettings(Component):
                        type_style("labelMedium", lang="zh"), content_color))
 
         def on_press(_ev):
-            morph.set_pressed(True)
+            morph.press()
             box = getattr(node, "box", None)
             if box is not None and box.w > 0:
                 queue_dirty(box.x, box.y, box.w, box.h)
 
         def on_release(_ev):
-            morph.set_pressed(False)
+            morph.release()
             box = getattr(node, "box", None)
             if box is not None and box.w > 0:
                 queue_dirty(box.x, box.y, box.w, box.h)

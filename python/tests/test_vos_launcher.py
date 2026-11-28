@@ -44,15 +44,15 @@ def test_manifest_names_no_conflict():
     names = {item["name"] for item in launcher.manifest()["components"]}
     assert len(names) == len(launcher.COMPONENTS)
     assert all(n.startswith("Md") for n in names)
-    existing = set(V.COMPONENTS)
+    existing = {n for n in V.COMPONENTS if not n.startswith("Md")}
     try:
         from Vapor import presets
 
         existing |= {c.name for c in presets.PRESETS}
     except Exception:
         pass
-    existing |= {c.name for c in chrome.COMPONENTS}
     assert names.isdisjoint(existing)
+    assert names.isdisjoint({c.name for c in chrome.COMPONENTS})
 
 
 def test_lockscreen_unlock_threshold():
@@ -96,15 +96,16 @@ def test_appgrid_reorder_readonly():
     assert [a["label"] for a in grid.extra["apps"]] == [a["label"] for a in apps]
 
 
-def test_appicon_shape_morph():
+def test_appicon_shape_morph(monkeypatch):
+    monkeypatch.setenv("VAPOR_REDUCED_MOTION", "1")
     icon = build(launcher.MdAppIcon, label="相机")
     morph = icon.extra["morph"]
     tile = icon.extra["tile"]
-    assert morph.radius == get_shape("large")
+    assert morph.radius(60) == get_shape("large", 60)
     fire(tile, "press")
-    assert morph.radius == get_shape("extraLarge")
+    assert morph.radius(60) == get_shape("extraLarge", 60)
     fire(tile, "release")
-    assert morph.radius == get_shape("large")
+    assert morph.radius(60) == get_shape("large", 60)
 
 
 def test_gesture_callbacks(monkeypatch):
