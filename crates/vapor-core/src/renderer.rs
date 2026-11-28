@@ -12,6 +12,7 @@ use vapor_abi::VaporRect;
 mod gles {
     use std::ffi::c_void;
     use crate::log::{log_msg, LOG_INFO};
+    use vapor_abi::VaporRect;
 
     pub type EGLDisplay = *mut c_void;
     pub type EGLSurface = *mut c_void;
