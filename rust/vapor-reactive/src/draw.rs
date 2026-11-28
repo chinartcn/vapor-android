@@ -145,7 +145,7 @@ pub fn ring_impl(data: &mut [u8], w: i32, h: i32, cx: i32, cy: i32, r: i32, widt
 }
 
 pub fn polygon_impl(data: &mut [u8], w: i32, h: i32, pts: &[(i32, i32)], color: u32) {
-    if pts.len() < 3 {
+    if w <= 0 || h <= 0 || pts.len() < 3 {
         return;
     }
     let mut min_y = i32::MAX;
@@ -278,6 +278,10 @@ fn with_pixels<R>(addr: u64, len: usize, f: impl FnOnce(&mut [u8]) -> R) -> PyRe
     if addr == 0 || len == 0 {
         return Err(PyRuntimeError::new_err("帧缓冲地址/长度无效"));
     }
+    if len > isize::MAX as usize {
+        return Err(PyRuntimeError::new_err("帧缓冲长度非法"));
+    }
+    // SAFETY: addr/len 由调用方保证指向一块可写内存（画布构造时已校验容量）。
     let data = unsafe { std::slice::from_raw_parts_mut(addr as *mut u8, len) };
     Ok(f(data))
 }
@@ -301,13 +305,20 @@ impl Canvas {
         if width <= 0 || height <= 0 {
             return Err(PyValueError::new_err("Canvas 宽高必须为正"));
         }
-        let need = (width as usize) * (height as usize) * 4;
+        if addr == 0 {
+            return Err(PyValueError::new_err("Canvas 帧缓冲地址无效"));
+        }
+        let need = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or_else(|| PyValueError::new_err("Canvas 尺寸溢出"))?;
         if len < need {
             return Err(PyValueError::new_err(format!(
                 "帧缓冲太小：需要 {need} 字节，实际 {len} 字节"
             )));
         }
-        Ok(Canvas { addr, len, width, height })
+        // 只暴露画布实际需要的字节数，避免图元以外区域被误写。
+        Ok(Canvas { addr, len: need, width, height })
     }
 
     #[getter]
@@ -431,7 +442,10 @@ impl Canvas {
         dy: i32,
         alpha: u8,
     ) -> PyResult<()> {
-        let need = (sw as usize) * (sh as usize) * 4;
+        let need = (sw as usize)
+            .checked_mul(sh as usize)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or_else(|| PyValueError::new_err("源缓冲尺寸溢出"))?;
         if src_addr == 0 || src_len < need {
             return Err(PyValueError::new_err("源缓冲为空或太小"));
         }
@@ -526,4 +540,17 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_color, m)?)?;
     m.add_function(wrap_pyfunction!(blend, m)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn polygon_zero_height_does_not_underflow() {
+        let mut buf = [0u8; 64];
+        // h == 0 时 h-1 会下溢为 i32::MAX，修复前会 panic / 越界。
+        polygon_impl(&mut buf, 2, 0, &[(0, 0), (1, 0), (0, 1)], 0xFFFF_FFFF);
+        polygon_impl(&mut buf, 0, 0, &[(0, 0), (1, 0), (0, 1)], 0xFFFF_FFFF);
+    }
 }

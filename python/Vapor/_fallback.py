@@ -244,6 +244,9 @@ def flush():
             if effect._paused:
                 continue
             if effect._scheduler is not None:
+                # 与 Rust 内核一致：交给调度器前先复位 _queued，
+                # 否则该 effect 之后不会再被 _propagate 入队。
+                effect._queued = False
                 effect._scheduler(effect)
             else:
                 effect.run()

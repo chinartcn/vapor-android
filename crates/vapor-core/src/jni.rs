@@ -933,3 +933,21 @@ pub fn shutdown_clear() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn float_result_keeps_fraction() {
+        // 回归：float 返回值曾用 `as i64` 截断为整数（3.5 -> 3.0）。
+        let v = unsafe { wrap_result(std::ptr::null_mut(), 'f', (3.5f32).to_bits() as i64, std::ptr::null_mut()) };
+        assert_eq!(v["v"].as_f64().unwrap(), 3.5);
+    }
+
+    #[test]
+    fn double_result_keeps_fraction() {
+        let v = unsafe { wrap_result(std::ptr::null_mut(), 'd', (2.25f64).to_bits() as i64, std::ptr::null_mut()) };
+        assert_eq!(v["v"].as_f64().unwrap(), 2.25);
+    }
+}

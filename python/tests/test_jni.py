@@ -43,6 +43,14 @@ def main() -> None:
     r = jni.call_static("java/lang/Math", "abs", "(I)I", [jni.i(-42)])
     check(r == 42, f"call_static Math.abs(-42) = {r}")
 
+    # 2b) 浮点返回值不能丢精度：float 与 double
+    r = jni.call_static("java/lang/Math", "abs", "(F)F", [jni.f(-3.5)])
+    check(isinstance(r, float) and abs(r - 3.5) < 1e-6,
+          f"call_static Math.abs(-3.5f) = {r}")
+    r = jni.call_static("java/lang/Math", "sqrt", "(D)D", [jni.d(2.0)])
+    check(abs(r - 1.4142135623730951) < 1e-9,
+          f"call_static Math.sqrt(2.0) = {r}")
+
     # 3) 字符串：new_string → 静态方法 valueOf(Object) → get_string
     with jni.new_string("hello 世界") as s:
         v = jni.call_static(

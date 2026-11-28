@@ -149,6 +149,17 @@ def test_watch_async_and_values():
     assert calls == [(1, 0)], calls
 
 
+def test_watch_multiple_distinct_changes():
+    """回归：scheduler 分支必须在派发前复位 queued，否则只有第一次变化回调。"""
+    count = core.ref(0)
+    calls = []
+    core.watch(count, lambda new, old: calls.append((new, old)))
+    for value in (1, 2, 3):
+        count.value = value
+        core.flush_jobs()
+    assert calls == [(1, 0), (2, 1), (3, 2)], calls
+
+
 def test_watch_immediate():
     count = core.ref(7)
     calls = []

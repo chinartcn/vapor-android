@@ -495,10 +495,13 @@ pub fn flush(py: Python<'_>) -> PyResult<()> {
                     .map(|s| s.clone_ref(py))
             });
             match scheduler {
-                // 自定义调度器：把 effect 句柄交给它，由它决定何时 run
+                // 自定义调度器：把 effect 句柄交给它，由它决定何时 run。
+                // 必须先复位 queued，否则调度器分支之后该 effect 永远不会再入队
+                // （watch 只回调第一次变化）。
                 Some(s) => {
+                    with(|a| a.nodes[id as usize].queued = false);
                     let handle = Py::new(py, EffectHandle { id })?;
-                    let _ = s.bind(py).call1((handle,));
+                    s.bind(py).call1((handle,))?;
                 }
                 None => {
                     run_effect(py, id)?;
