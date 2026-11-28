@@ -149,7 +149,7 @@ class Font:
 
     def draw(self, canvas, text, x, y, color, size):
         """把一行文本画进 Canvas；y 是行顶部。返回推进宽度。"""
-        return self.raw.draw(canvas.buffer, canvas.width, canvas.height,
+        return self.raw.draw(canvas.address, canvas.length, canvas.width, canvas.height,
                              str(text), float(x), float(y), float(size), int(color))
 
     def __repr__(self):
@@ -187,7 +187,7 @@ class FontStack:
         return float(self.raw.coverage(str(text)))
 
     def draw(self, canvas, text, x, y, color, size):
-        return self.raw.draw(canvas.buffer, canvas.width, canvas.height,
+        return self.raw.draw(canvas.address, canvas.length, canvas.width, canvas.height,
                              str(text), float(x), float(y), float(size), int(color))
 
     def __len__(self):

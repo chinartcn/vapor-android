@@ -272,39 +272,14 @@ pub fn stroke_polyline_impl(
     }
 }
 
-/// CPython 缓冲协议标志（与 CPython 头文件一致，避免依赖 pyo3-ffi 的常量导出）
-const PYBUF_WRITABLE: i32 = 0x0001;
-const PYBUF_C_CONTIGUOUS: i32 = 0x0020;
-
-fn with_pixels<R>(py: Python<'_>, buf: &Py<PyAny>, w: i32, h: i32, f: impl FnOnce(&mut [u8]) -> R) -> PyResult<R> {
-    // 直接用 CPython 缓冲协议（pyo3::ffi），不依赖 pyo3::buffer 模块（0.30 已不导出）。
-    unsafe {
-        let obj = buf.bind(py).as_ptr();
-        let mut view: pyo3::ffi::Py_buffer = std::mem::zeroed();
-        let flags = PYBUF_WRITABLE | PYBUF_C_CONTIGUOUS;
-        if pyo3::ffi::PyObject_GetBuffer(obj, &mut view, flags) != 0 {
-            pyo3::ffi::PyErr_Clear();
-            return Err(PyRuntimeError::new_err(
-                "需要可写的 C 连续缓冲区（memoryview / bytearray）",
-            ));
-        }
-        let len = view.len.max(0) as usize;
-        let need = (w as usize) * (h as usize) * 4;
-        if len < need {
-            let msg = format!("帧缓冲太小：需要 {need} 字节，实际 {len} 字节");
-            pyo3::ffi::PyBuffer_Release(&mut view);
-            return Err(PyValueError::new_err(msg));
-        }
-        let ptr = view.buf as *mut u8;
-        let result = if ptr.is_null() || len == 0 {
-            Err(PyRuntimeError::new_err("帧缓冲为空"))
-        } else {
-            let data = std::slice::from_raw_parts_mut(ptr, len);
-            Ok(f(data))
-        };
-        pyo3::ffi::PyBuffer_Release(&mut view);
-        result
+/// 直接用 (地址, 长度) 写内存：Python 侧用 ctypes 取到帧缓冲地址后传进来。
+/// 这样不依赖 pyo3 的 buffer 模块（0.30 在 abi3 下不再提供缓冲协议绑定）。
+fn with_pixels<R>(addr: u64, len: usize, f: impl FnOnce(&mut [u8]) -> R) -> PyResult<R> {
+    if addr == 0 || len == 0 {
+        return Err(PyRuntimeError::new_err("帧缓冲地址/长度无效"));
     }
+    let data = unsafe { std::slice::from_raw_parts_mut(addr as *mut u8, len) };
+    Ok(f(data))
 }
 
 // ---------------------------------------------------------------------------
@@ -313,7 +288,8 @@ fn with_pixels<R>(py: Python<'_>, buf: &Py<PyAny>, w: i32, h: i32, f: impl FnOnc
 
 #[pyclass(module = "Vapor._core", name = "Canvas")]
 pub struct Canvas {
-    buf: Py<PyAny>,
+    addr: u64,
+    len: usize,
     width: i32,
     height: i32,
 }
@@ -321,11 +297,17 @@ pub struct Canvas {
 #[pymethods]
 impl Canvas {
     #[new]
-    fn new(buf: Py<PyAny>, width: i32, height: i32) -> PyResult<Self> {
+    fn new(addr: u64, len: usize, width: i32, height: i32) -> PyResult<Self> {
         if width <= 0 || height <= 0 {
             return Err(PyValueError::new_err("Canvas 宽高必须为正"));
         }
-        Ok(Canvas { buf, width, height })
+        let need = (width as usize) * (height as usize) * 4;
+        if len < need {
+            return Err(PyValueError::new_err(format!(
+                "帧缓冲太小：需要 {need} 字节，实际 {len} 字节"
+            )));
+        }
+        Ok(Canvas { addr, len, width, height })
     }
 
     #[getter]
@@ -342,134 +324,121 @@ impl Canvas {
         (self.width, self.height)
     }
 
-    fn clear(&self, py: Python<'_>, color: u32) -> PyResult<()> {
+    fn clear(&self, color: u32) -> PyResult<()> {
         let (w, h) = (self.width, self.height);
-        with_pixels(py, &self.buf, w, h, |data| {
+        with_pixels(self.addr, self.len, |data| {
             fill_rect_impl(data, w, h, 0, 0, w, h, color)
         })
     }
 
     #[pyo3(signature = (x, y, w, h, color))]
-    fn fill_rect(&self, py: Python<'_>, x: i32, y: i32, w: i32, h: i32, color: u32) -> PyResult<()> {
+    fn fill_rect(&self, x: i32, y: i32, w: i32, h: i32, color: u32) -> PyResult<()> {
         let (cw, ch) = (self.width, self.height);
-        with_pixels(py, &self.buf, cw, ch, |data| fill_rect_impl(data, cw, ch, x, y, w, h, color))
+        with_pixels(self.addr, self.len, |data| fill_rect_impl(data, cw, ch, x, y, w, h, color))
     }
 
-    fn rect(&self, py: Python<'_>, x: i32, y: i32, w: i32, h: i32, color: u32) -> PyResult<()> {
-        self.fill_rect(py, x, y, w, h, color)
+    fn rect(&self, x: i32, y: i32, w: i32, h: i32, color: u32) -> PyResult<()> {
+        self.fill_rect(x, y, w, h, color)
     }
 
-    fn pixel(&self, py: Python<'_>, x: i32, y: i32, color: u32) -> PyResult<()> {
+    fn pixel(&self, x: i32, y: i32, color: u32) -> PyResult<()> {
         let (w, h) = (self.width, self.height);
         if x < 0 || y < 0 || x >= w || y >= h {
             return Ok(());
         }
-        with_pixels(py, &self.buf, w, h, |data| put(data, w, x, y, color))
+        with_pixels(self.addr, self.len, |data| put(data, w, x, y, color))
     }
 
-    fn get_pixel(&self, py: Python<'_>, x: i32, y: i32) -> PyResult<u32> {
+    fn get_pixel(&self, x: i32, y: i32) -> PyResult<u32> {
         let (w, h) = (self.width, self.height);
         if x < 0 || y < 0 || x >= w || y >= h {
             return Ok(0);
         }
-        with_pixels(py, &self.buf, w, h, |data| {
+        with_pixels(self.addr, self.len, |data| {
             let i = idx(x, y, w);
             (data[i] as u32) | ((data[i + 1] as u32) << 8) | ((data[i + 2] as u32) << 16) | ((data[i + 3] as u32) << 24)
         })
     }
 
     #[pyo3(signature = (x0, y0, x1, y1, color, width=1))]
-    fn line(&self, py: Python<'_>, x0: i32, y0: i32, x1: i32, y1: i32, color: u32, width: i32) -> PyResult<()> {
+    fn line(&self, x0: i32, y0: i32, x1: i32, y1: i32, color: u32, width: i32) -> PyResult<()> {
         let (w, h) = (self.width, self.height);
-        with_pixels(py, &self.buf, w, h, |data| line_impl(data, w, h, x0, y0, x1, y1, color, width))
+        with_pixels(self.addr, self.len, |data| line_impl(data, w, h, x0, y0, x1, y1, color, width))
     }
 
-    fn hline(&self, py: Python<'_>, x: i32, y: i32, w: i32, color: u32) -> PyResult<()> {
-        self.fill_rect(py, x, y, w, 1, color)
+    fn hline(&self, x: i32, y: i32, w: i32, color: u32) -> PyResult<()> {
+        self.fill_rect(x, y, w, 1, color)
     }
 
-    fn vline(&self, py: Python<'_>, x: i32, y: i32, h: i32, color: u32) -> PyResult<()> {
-        self.fill_rect(py, x, y, 1, h, color)
+    fn vline(&self, x: i32, y: i32, h: i32, color: u32) -> PyResult<()> {
+        self.fill_rect(x, y, 1, h, color)
     }
 
-    fn disc(&self, py: Python<'_>, cx: i32, cy: i32, r: i32, color: u32) -> PyResult<()> {
+    fn disc(&self, cx: i32, cy: i32, r: i32, color: u32) -> PyResult<()> {
         let (w, h) = (self.width, self.height);
-        with_pixels(py, &self.buf, w, h, |data| disc_impl(data, w, h, cx, cy, r, color))
+        with_pixels(self.addr, self.len, |data| disc_impl(data, w, h, cx, cy, r, color))
     }
 
     #[pyo3(signature = (cx, cy, r, color, width=1))]
-    fn ring(&self, py: Python<'_>, cx: i32, cy: i32, r: i32, color: u32, width: i32) -> PyResult<()> {
+    fn ring(&self, cx: i32, cy: i32, r: i32, color: u32, width: i32) -> PyResult<()> {
         let (w, h) = (self.width, self.height);
-        with_pixels(py, &self.buf, w, h, |data| ring_impl(data, w, h, cx, cy, r, width, color))
+        with_pixels(self.addr, self.len, |data| ring_impl(data, w, h, cx, cy, r, width, color))
     }
 
     #[pyo3(signature = (cx, cy, r, color, width=1))]
-    fn circle(&self, py: Python<'_>, cx: i32, cy: i32, r: i32, color: u32, width: i32) -> PyResult<()> {
-        self.ring(py, cx, cy, r, color, width)
+    fn circle(&self, cx: i32, cy: i32, r: i32, color: u32, width: i32) -> PyResult<()> {
+        self.ring(cx, cy, r, color, width)
     }
 
-    fn polygon(&self, py: Python<'_>, points: Vec<(i32, i32)>, color: u32) -> PyResult<()> {
+    fn polygon(&self, points: Vec<(i32, i32)>, color: u32) -> PyResult<()> {
         let (w, h) = (self.width, self.height);
-        with_pixels(py, &self.buf, w, h, |data| polygon_impl(data, w, h, &points, color))
+        with_pixels(self.addr, self.len, |data| polygon_impl(data, w, h, &points, color))
     }
 
     #[pyo3(signature = (points, color, width=1, closed=false))]
-    fn polyline(&self, py: Python<'_>, points: Vec<(i32, i32)>, color: u32, width: i32, closed: bool) -> PyResult<()> {
+    fn polyline(&self, points: Vec<(i32, i32)>, color: u32, width: i32, closed: bool) -> PyResult<()> {
         let (w, h) = (self.width, self.height);
-        with_pixels(py, &self.buf, w, h, |data| {
+        with_pixels(self.addr, self.len, |data| {
             stroke_polyline_impl(data, w, h, &points, color, width, closed)
         })
     }
 
     #[pyo3(signature = (x, y, w, h, radius, color))]
-    fn round_rect(&self, py: Python<'_>, x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32) -> PyResult<()> {
+    fn round_rect(&self, x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32) -> PyResult<()> {
         let (cw, ch) = (self.width, self.height);
-        with_pixels(py, &self.buf, cw, ch, |data| {
+        with_pixels(self.addr, self.len, |data| {
             round_rect_impl(data, cw, ch, x, y, w, h, radius, color)
         })
     }
 
     #[pyo3(signature = (x, y, w, h, c1, c2, vertical=false))]
-    fn gradient(&self, py: Python<'_>, x: i32, y: i32, w: i32, h: i32, c1: u32, c2: u32, vertical: bool) -> PyResult<()> {
+    fn gradient(&self, x: i32, y: i32, w: i32, h: i32, c1: u32, c2: u32, vertical: bool) -> PyResult<()> {
         let (cw, ch) = (self.width, self.height);
-        with_pixels(py, &self.buf, cw, ch, |data| {
+        with_pixels(self.addr, self.len, |data| {
             gradient_impl(data, cw, ch, x, y, w, h, c1, c2, vertical)
         })
     }
 
-    #[pyo3(signature = (src, sw, sh, dx, dy, alpha=255))]
+    #[pyo3(signature = (src_addr, src_len, sw, sh, dx, dy, alpha=255))]
+    #[allow(clippy::too_many_arguments)]
     fn blit(
         &self,
-        py: Python<'_>,
-        src: Py<PyAny>,
+        src_addr: u64,
+        src_len: usize,
         sw: i32,
         sh: i32,
         dx: i32,
         dy: i32,
         alpha: u8,
     ) -> PyResult<()> {
-        // 先取源数据副本，避免同时持有两块缓冲区的借用
-        let copy: Vec<u8> = unsafe {
-            let obj = src.bind(py).as_ptr();
-            let mut view: pyo3::ffi::Py_buffer = std::mem::zeroed();
-            // 源只读：只要 C 连续即可
-            if pyo3::ffi::PyObject_GetBuffer(obj, &mut view, PYBUF_C_CONTIGUOUS) != 0 {
-                pyo3::ffi::PyErr_Clear();
-                return Err(PyRuntimeError::new_err("源对象不支持缓冲协议"));
-            }
-            let need = (sw as usize) * (sh as usize) * 4;
-            let len = view.len.max(0) as usize;
-            let ptr = view.buf as *const u8;
-            let out = if ptr.is_null() || len < need {
-                Err(PyValueError::new_err("源缓冲太小"))
-            } else {
-                Ok(std::slice::from_raw_parts(ptr, need).to_vec())
-            };
-            pyo3::ffi::PyBuffer_Release(&mut view);
-            out?
-        };
+        let need = (sw as usize) * (sh as usize) * 4;
+        if src_addr == 0 || src_len < need {
+            return Err(PyValueError::new_err("源缓冲为空或太小"));
+        }
+        let copy: Vec<u8> =
+            unsafe { std::slice::from_raw_parts(src_addr as *const u8, need) }.to_vec();
         let (w, h) = (self.width, self.height);
-        with_pixels(py, &self.buf, w, h, |data| {
+        with_pixels(self.addr, self.len, |data| {
             for y in 0..sh {
                 let ty = dy + y;
                 if ty < 0 || ty >= h {

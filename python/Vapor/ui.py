@@ -272,16 +272,36 @@ def _flow(node):
 # Canvas
 # ---------------------------------------------------------------------------
 
+def _buffer_address(buffer):
+    """取可写 C 连续缓冲的 (地址, 长度)：原生 Canvas 直接按地址写内存。
+
+    这样 Rust 侧不需要依赖缓冲协议绑定（PyO3 0.30 在 abi3 下不提供），
+    Python 侧用 ctypes 拿地址，帧缓冲本身仍然由 Python 对象持有。
+    """
+    import ctypes
+
+    view = memoryview(buffer)
+    if view.readonly:
+        raise TypeError("帧缓冲必须是可写缓冲区")
+    if not view.c_contiguous:
+        raise TypeError("帧缓冲必须是 C 连续缓冲区")
+    return ctypes.addressof(ctypes.c_char.from_buffer(view)), view.nbytes
+
+
 class Canvas:
     """帧缓冲绘制封装：坐标统一取整，原生可用时走 Rust 光栅化。"""
 
-    __slots__ = ("_c", "width", "height", "buffer")
+    __slots__ = ("_c", "width", "height", "buffer", "address", "length")
 
     def __init__(self, buffer, width, height):
-        self._c = _core.Canvas(buffer, int(width), int(height))
         self.width, self.height = int(width), int(height)
-        # 字体扩展直接往这块内存里写字形（与 _core.Canvas 共享同一缓冲）
         self.buffer = buffer
+        if getattr(_core, "FALLBACK", False):
+            self.address, self.length = 0, 0
+            self._c = _core.Canvas(buffer, self.width, self.height)
+        else:
+            self.address, self.length = _buffer_address(buffer)
+            self._c = _core.Canvas(self.address, self.length, self.width, self.height)
 
     # -- 图元 --
     def clear(self, c):
