@@ -47,7 +47,17 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@v3
+      - name: 安装 Android SDK 组件
+        shell: bash
+        run: |
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          CMD="$(ls -d "$SDK"/cmdline-tools/*/bin 2>/dev/null | head -1)"
+          echo "SDK=$SDK CMD=$CMD"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "$CMD" >> "$GITHUB_PATH"
+          echo "$SDK/platform-tools" >> "$GITHUB_PATH"
+          yes | "$CMD/sdkmanager" --licenses >/dev/null 2>&1 || true
+          "$CMD/sdkmanager" "platforms;android-35" "build-tools;35.0.0" "platform-tools"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi
