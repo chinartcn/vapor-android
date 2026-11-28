@@ -40,6 +40,10 @@ mkdir -p "$OUT" "$SRC" "$DOWNLOADS"
 PY_TGZ="$DOWNLOADS/Python-$PYTHON_VERSION.tgz"
 PY_XZ="$DOWNLOADS/Python-$PYTHON_VERSION.tar.xz"
 ARM64_PKG="$DOWNLOADS/python-$PYTHON_VERSION-aarch64-linux-android.tar.gz"
+# CPython 3.15 的 _ctypes 依赖系统 libffi（源码树不再自带），而 NDK sysroot 没有
+# ffi.h。arm32 必须自行交叉编译一份静态 libffi，否则 rust.Vapor 的 ctypes 绑定不可用。
+LIBFFI_VERSION="${LIBFFI_VERSION:-3.4.6}"
+LIBFFI_TGZ="$DOWNLOADS/libffi-$LIBFFI_VERSION.tar.gz"
 
 SHA_TGZ="f74e1db0eabd651cd01e4e2a00201bd41866abe74869ab716f9bf33cbbaa0943"
 SHA_ARM64="cfd4f0fdaff465ba62ebf3c3df2c8c410d0802fef3f98897082460df704cfef6"
@@ -110,17 +114,60 @@ ensure_host_python() {
   BUILD_PYTHON="$hp"
 }
 
+# 为 arm32 交叉编译静态 libffi（_ctypes 依赖）。产物：build/libffi/arm32。
+build_libffi_arm32() {
+  local prefix="$ROOT/build/libffi/arm32"
+  LIBFFI_PREFIX="$prefix"
+  if [ -f "$prefix/lib/libffi.a" ]; then return 0; fi
+  if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
+    echo "[FATAL] libffi 交叉编译需要 ANDROID_NDK_HOME" >&2
+    exit 1
+  fi
+  if [ ! -f "$LIBFFI_TGZ" ]; then
+    echo "[get] libffi $LIBFFI_VERSION (GitHub releases)"
+    curl -fL --retry 3 -o "$LIBFFI_TGZ" \
+      "https://github.com/libffi/libffi/releases/download/v$LIBFFI_VERSION/libffi-$LIBFFI_VERSION.tar.gz"
+  fi
+  local s="$SRC/libffi-$LIBFFI_VERSION"
+  if [ ! -d "$s" ]; then tar -xzf "$LIBFFI_TGZ" -C "$SRC"; fi
+  local TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+  local SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+  local CHOST="armv7a-linux-androideabi24"
+  echo "===== arm32: 交叉编译 libffi $LIBFFI_VERSION（_ctypes 依赖）====="
+  (
+    cd "$s"
+    make distclean >/dev/null 2>&1 || true
+    CC="$TOOLCHAIN/$CHOST-clang" CXX="$TOOLCHAIN/$CHOST-clang++" \
+    AR="$TOOLCHAIN/llvm-ar" RANLIB="$TOOLCHAIN/llvm-ranlib" \
+    CFLAGS="-fPIC --sysroot=$SYSROOT" LDFLAGS="--sysroot=$SYSROOT" \
+      ./configure --host=arm-linux-androideabi --prefix="$prefix" \
+        --disable-shared --enable-static --disable-docs \
+      && make -k -j"$(nproc)" \
+      && make install
+  )
+  if [ ! -f "$prefix/lib/libffi.a" ]; then
+    echo "[FATAL] libffi arm32 构建失败（缺少 $prefix/lib/libffi.a）" >&2
+    exit 1
+  fi
+  LIBFFI_PREFIX="$prefix"
+}
+
 # 把交叉编译产出的扩展模块（math/_ctypes/zlib/...）放进 lib-dynload。
 # 这些是 CPython 标准库里以 .so 形式提供的模块，缺了它们 `import math` 会直接报
 # ModuleNotFoundError（真机日志即为此现象）。
 install_built_extensions() {
   local s="$1" d="$2" copied=0 so
   mkdir -p "$d/lib/python$PYTHON_MAJOR_MINOR/lib-dynload"
+  # CPython 的扩展模块在源码树里是就地构建到 Modules/ 下的（不是 build/），
+  # 因此两处都要搜。
   while IFS= read -r so; do
     [ -n "$so" ] || continue
     cp -f "$so" "$d/lib/python$PYTHON_MAJOR_MINOR/lib-dynload/"
     copied=$((copied + 1))
-  done < <(find "$s/build" -maxdepth 2 -type f -name '*.so' ! -name 'libpython*' 2>/dev/null)
+  done < <(
+    find "$s/Modules" -type f -name '*.so' ! -name 'libpython*' 2>/dev/null
+    find "$s/build" -maxdepth 2 -type f -name '*.so' ! -name 'libpython*' 2>/dev/null
+  )
   # 平台相关配置模块（sysconfig 需要）
   find "$s/build" -maxdepth 2 -type f -name '_sysconfigdata*.py' \
     -exec cp -f {} "$d/lib/python$PYTHON_MAJOR_MINOR/" \; 2>/dev/null || true
@@ -225,13 +272,18 @@ build_arm32() {
 
   local TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
   local HOST="armv7a-linux-androideabi24"
+  local FFI_PREFIX
+  build_libffi_arm32
+  FFI_PREFIX="$LIBFFI_PREFIX"
   export CC="$TOOLCHAIN/$HOST-clang"
   export CXX="$TOOLCHAIN/$HOST-clang++"
   export AR="$TOOLCHAIN/llvm-ar"
   export RANLIB="$TOOLCHAIN/llvm-ranlib"
   export SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-  export CFLAGS="-fPIC -D__ANDROID_API__=24 --sysroot=$SYSROOT"
-  export LDFLAGS="--sysroot=$SYSROOT"
+  export CFLAGS="-fPIC -D__ANDROID_API__=24 --sysroot=$SYSROOT -I$FFI_PREFIX/include"
+  export LDFLAGS="--sysroot=$SYSROOT -L$FFI_PREFIX/lib"
+  export LIBFFI_CFLAGS="-I$FFI_PREFIX/include"
+  export LIBFFI_LIBS="$FFI_PREFIX/lib/libffi.a"
 
   cd "$s"
   # 每次都用正确的 Android 探测结果重新 configure（幂等，避免旧 Makefile 残留宿主库探测）。
