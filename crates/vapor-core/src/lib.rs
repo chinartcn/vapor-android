@@ -460,10 +460,10 @@ pub extern "C" fn Java_com_vapor_RendererActivity_nativePermissionResult(
     _env: *mut c_void,
     _thiz: *mut c_void,
     code: i32,
-    granted: i32,
+    granted: u8,
 ) {
     if let Ok(mut map) = permission_results().lock() {
-        map.insert(code, granted);
+        map.insert(code, granted as i32);
     }
 }
 

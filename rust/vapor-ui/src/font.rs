@@ -61,13 +61,18 @@ impl Face {
         if units_per_em <= 0.0 {
             return Err("units_per_em 非法".to_string());
         }
+        // 先把度量算出来再构造结构体：结构体字面量里 face 一旦移动，
+        // 后面的 face.ascender() 就会触发 E0382（borrow of moved value）。
+        let ascent = face.ascender() as f32;
+        let descent = face.descender() as f32;
+        let line_gap = face.line_gap() as f32;
         Ok(Face {
             data,
             face,
             units_per_em,
-            ascent: face.ascender() as f32,
-            descent: face.descender() as f32,
-            line_gap: face.line_gap() as f32,
+            ascent,
+            descent,
+            line_gap,
             index,
             cache: Mutex::new(HashMap::new()),
         })
