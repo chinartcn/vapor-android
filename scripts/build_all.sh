@@ -45,11 +45,12 @@ echo "========== [3/6] Rust 双架构交叉编译（cargo-ndk） =========="
 rustup target add aarch64-linux-android armv7-linux-androideabi 2>/dev/null || true
 command -v cargo-ndk >/dev/null || { echo "缺少 cargo-ndk（cargo install cargo-ndk）" >&2; exit 1; }
 # 渲染器：两个架构都产出 libvapor.so
+# 注意：新版 cargo-ndk 要求 -p 放在 build 之后（转发给 cargo）
 cargo ndk -t arm64-v8a -t armeabi-v7a -o "$BUILD/jniLibs/renderer" \
-    -p vapor-renderer build --release
+    build --release -p vapor-renderer
 # 打包器：两个架构都产出 libvapor_packager.so
 cargo ndk -t arm64-v8a -t armeabi-v7a -o "$BUILD/jniLibs/packager" \
-    -p vapor-packager build --release
+    build --release -p vapor-packager
 
 echo "========== [4/6] 把 CPython 运行库注入 jniLibs =========="
 # arm64 官方包: libpython3.15.so 在 prefix/lib/ ; arm32 源码编译: 在输出根目录
