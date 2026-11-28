@@ -63,6 +63,16 @@ pub struct VaporFramebuffer {
     pub generation: u64,
 }
 
+/// 脏矩形（逻辑像素、左上原点）。用于 `fb_present_dirty` 局部上传。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VaporRect {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VaporEvent {
@@ -128,6 +138,10 @@ pub struct VaporApi {
         i32,
     ) -> i32,
     pub jni_release: unsafe extern "C" fn(i64) -> i32,
+
+    // ---- 脏区局部上传（v1.2 追加在尾部，前向兼容） ----
+    /// `count <= 0` 或 `rects == NULL` 等价全帧上传。
+    pub fb_present_dirty: unsafe extern "C" fn(*const VaporRect, i32) -> i32,
 }
 
 /// C 扩展入口：`int vapor_ext_init(VaporApi* api)`。
@@ -144,10 +158,11 @@ mod tests {
         assert_eq!(size_of::<VaporFramebuffer>(), 40); // ptr8 + 4*5=20 + pad4 + u64 8 = 40
         assert_eq!(size_of::<VaporEvent>(), 40); // 4*8=32 + u64 8 = 40
         assert_eq!(size_of::<VaporConfig>(), 40);
+        assert_eq!(size_of::<VaporRect>(), 16);
         assert_eq!(VAPOR_ABI_VERSION, 1);
         assert_eq!(VAPOR_CPYTHON_VERSION, "3.15.2");
-        // 函数表条目数 = 头文件 VaporApi 字段数（30 基础 + 6 JNI = 36）
+        // 函数表条目数 = 头文件 VaporApi 字段数（30 基础 + 6 JNI + 1 脏区 = 37）
         let api_size = size_of::<VaporApi>();
-        assert_eq!(api_size, 36 * size_of::<usize>());
+        assert_eq!(api_size, 37 * size_of::<usize>());
     }
 }

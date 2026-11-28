@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .. import _native
 from . import text as _text
+from .dirty import ledger
 
 _core = _native.core
 
@@ -41,50 +42,94 @@ class Canvas:
             self.address, self.length = _buffer_address(buffer)
             self._c = _core.Canvas(self.address, self.length, self.width, self.height)
 
+    # -- 脏区 --
+    def _mark(self, x, y, w, h):
+        ledger.mark_rect(x, y, w, h)
+
     # -- 图元 --
     def clear(self, c):
         self._c.clear(int(c))
+        ledger.mark_full()          # clear 是全局脏
 
     def fill_rect(self, x, y, w, h, c):
-        self._c.fill_rect(int(x), int(y), int(w), int(h), int(c))
+        x, y, w, h = int(x), int(y), int(w), int(h)
+        self._c.fill_rect(x, y, w, h, int(c))
+        self._mark(x, y, w, h)
 
     rect = fill_rect
 
     def pixel(self, x, y, c):
-        self._c.pixel(int(x), int(y), int(c))
+        x, y = int(x), int(y)
+        self._c.pixel(x, y, int(c))
+        self._mark(x, y, 1, 1)
 
     def line(self, x0, y0, x1, y1, c, width=1):
-        self._c.line(int(x0), int(y0), int(x1), int(y1), int(c), int(width))
+        x0, y0, x1, y1, width = int(x0), int(y0), int(x1), int(y1), int(width)
+        self._c.line(x0, y0, x1, y1, int(c), width)
+        bw = max(1, width)
+        self._mark(min(x0, x1) - bw, min(y0, y1) - bw,
+                   abs(x1 - x0) + 2 * bw, abs(y1 - y0) + 2 * bw)
 
     def hline(self, x, y, w, c):
-        self._c.hline(int(x), int(y), int(w), int(c))
+        x, y, w = int(x), int(y), int(w)
+        self._c.hline(x, y, w, int(c))
+        self._mark(x, y, w, 1)
 
     def vline(self, x, y, h, c):
-        self._c.vline(int(x), int(y), int(h), int(c))
+        x, y, h = int(x), int(y), int(h)
+        self._c.vline(x, y, h, int(c))
+        self._mark(x, y, 1, h)
 
     def disc(self, cx, cy, r, c):
-        self._c.disc(int(cx), int(cy), int(r), int(c))
+        cx, cy, r = int(cx), int(cy), int(r)
+        self._c.disc(cx, cy, r, int(c))
+        self._mark(cx - r, cy - r, 2 * r, 2 * r)
 
     def ring(self, cx, cy, r, c, width=1):
-        self._c.ring(int(cx), int(cy), int(r), int(c), int(width))
+        cx, cy, r, width = int(cx), int(cy), int(r), int(width)
+        self._c.ring(cx, cy, r, int(c), width)
+        pad = max(1, width)
+        self._mark(cx - r - pad, cy - r - pad, 2 * (r + pad), 2 * (r + pad))
 
     def circle(self, cx, cy, r, c, width=1):
-        self._c.circle(int(cx), int(cy), int(r), int(c), int(width))
+        cx, cy, r, width = int(cx), int(cy), int(r), int(width)
+        self._c.circle(cx, cy, r, int(c), width)
+        pad = max(1, width)
+        self._mark(cx - r - pad, cy - r - pad, 2 * (r + pad), 2 * (r + pad))
 
     def polygon(self, points, c, fill_rule="nonzero"):
-        self._c.polygon([(int(x), int(y)) for x, y in points], int(c), fill_rule)
+        pts = [(int(x), int(y)) for x, y in points]
+        self._c.polygon(pts, int(c), fill_rule)
+        _mark_points(self, pts, 0)
 
     def polyline(self, points, c, width=1, closed=False):
-        self._c.polyline([(int(x), int(y)) for x, y in points], int(c), int(width), bool(closed))
+        pts = [(int(x), int(y)) for x, y in points]
+        width = int(width)
+        self._c.polyline(pts, int(c), width, bool(closed))
+        _mark_points(self, pts, max(1, width))
 
     def round_rect(self, x, y, w, h, radius, c):
-        self._c.round_rect(int(x), int(y), int(w), int(h), int(radius), int(c))
+        x, y, w, h, radius = int(x), int(y), int(w), int(h), int(radius)
+        self._c.round_rect(x, y, w, h, radius, int(c))
+        self._mark(x, y, w, h)
 
     def gradient(self, x, y, w, h, c1, c2, vertical=False):
-        self._c.gradient(int(x), int(y), int(w), int(h), int(c1), int(c2), bool(vertical))
+        x, y, w, h = int(x), int(y), int(w), int(h)
+        self._c.gradient(x, y, w, h, int(c1), int(c2), bool(vertical))
+        self._mark(x, y, w, h)
 
     def text(self, s, x, y, c, size=16, scale=None):
         _text.draw_text(self, s, x, y, c, size=size, scale=scale)
+
+
+def _mark_points(canvas, points, pad):
+    if not points:
+        return
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    x0, x1 = min(xs) - pad, max(xs) + pad
+    y0, y1 = min(ys) - pad, max(ys) + pad
+    canvas._mark(x0, y0, x1 - x0, y1 - y0)
 
 
 class Surface:
@@ -130,10 +175,15 @@ class Surface:
                 pass
         return Canvas(self.buffer, self.width, self.height)
 
-    def present(self):
+    def present(self, rects=None):
         if self._native and self._rv is not None:
             try:
-                self._rv.present()
+                dirty = getattr(self._rv, "present_dirty", None) if rects else None
+                if dirty is not None:
+                    dirty(rects)
+                else:
+                    # 空/None 或旧版绑定 → 全帧（安全兜底）。
+                    self._rv.present()
             except Exception:
                 pass
 

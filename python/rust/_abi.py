@@ -61,6 +61,15 @@ class VaporFramebuffer(Structure):
     ]
 
 
+class VaporRect(Structure):
+    _fields_ = [
+        ("x", c_int32),
+        ("y", c_int32),
+        ("w", c_int32),
+        ("h", c_int32),
+    ]
+
+
 class VaporEvent(Structure):
     _fields_ = [
         ("type", c_int32),
@@ -108,6 +117,10 @@ class _Fallback:
         out.format, out.fd, out.generation = FMT_RGBA8888, -1, self._generation
         return VAPOR_OK
     def vapor_fb_unlock(self):
+        self._generation += 1
+        return VAPOR_OK
+    def vapor_fb_present_dirty(self, rects, count):
+        # 内存回退没有 GPU 上屏；保持接口一致即可。
         self._generation += 1
         return VAPOR_OK
     def vapor_fb_clear(self, rgba):
@@ -184,6 +197,9 @@ def _bind(lib: ctypes.CDLL) -> None:
     bind("vapor_fb_unlock", c_int32, [])
     bind("vapor_fb_resize", c_int32, [c_int32, c_int32])
     bind("vapor_fb_clear", c_int32, [c_uint32])
+    # v1.2 追加：老版本库没有该符号时退回全帧路径。
+    if hasattr(lib, "vapor_fb_present_dirty"):
+        bind("vapor_fb_present_dirty", c_int32, [POINTER(VaporRect), c_int32])
     bind("vapor_poll_event", c_int32, [POINTER(VaporEvent)])
     bind("vapor_event_count", c_int32, [])
     bind("vapor_set_title", c_int32, [c_char_p])

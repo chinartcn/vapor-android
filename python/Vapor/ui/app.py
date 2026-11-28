@@ -8,6 +8,7 @@ from .. import core
 from .base import _FRAGMENT
 from .canvas import Surface
 from .colors import color
+from .dirty import ledger
 from .input import Event, PointerRouter
 from .layout import layout
 from .navigation import Navigator
@@ -21,11 +22,14 @@ class App:
     """应用外壳：挂载、布局、绘制、事件、动画、帧循环。"""
 
     def __init__(self, root, width=None, height=None, background="#0B0E13",
-                 surface=None, fps=60, registry=None, use_native=True):
+                 surface=None, fps=60, registry=None, use_native=True,
+                 dirty_rects=False):
         self.root_component = root
         self.width = width
         self.height = height
         self.background = background
+        # 脏区总开关：默认关闭，行为与旧版完全一致（每帧全帧上传）。
+        self.dirty_rects = bool(dirty_rects)
         self.fps = fps
         self.surface = surface
         self.renderer = Renderer(registry)
@@ -68,6 +72,9 @@ class App:
 
     def tick(self, now=None):
         now = time.monotonic() if now is None else now
+        if self.dirty_rects and self.width and self.height:
+            ledger.set_canvas(self.width, self.height)
+            ledger.begin_frame()
         core.flush_jobs()
         self.pointer.update(now)
         self._run_animations(now)
@@ -76,12 +83,16 @@ class App:
                 hook(now)
             except Exception as exc:
                 _warn(f"on_tick 回调失败: {exc}")
-        if self.root is not None:
-            layout(self.root, 0, 0, self.width, self.height)
-            canvas = self.surface.canvas()
-            canvas.clear(color(self.background))
-            _paint_node(canvas, self.root)
-            self.surface.present()
+        try:
+            if self.root is not None:
+                layout(self.root, 0, 0, self.width, self.height)
+                canvas = self.surface.canvas()
+                canvas.clear(color(self.background))
+                _paint_node(canvas, self.root)
+                self.surface.present(ledger.rects() if self.dirty_rects else None)
+        finally:
+            if self.dirty_rects:
+                ledger.end_frame()
         self._dirty = False
         return self
 

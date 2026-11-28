@@ -6,6 +6,7 @@
 
 use crate::state::{State, DEFAULT_H, DEFAULT_W};
 use crate::log::{log_msg, LOG_INFO};
+use vapor_abi::VaporRect;
 
 #[cfg(target_os = "android")]
 mod gles {
@@ -275,7 +276,7 @@ mod gles {
             if w > 0 && h > 0 { (w, h) } else { (fb_w, fb_h) }
         }
 
-        pub fn draw(&mut self, pixels: &[u8], w: i32, h: i32) {
+        pub fn draw(&mut self, pixels: &[u8], w: i32, h: i32, regions: Option<&[VaporRect]>) {
             unsafe {
                 // surface/context/display 必须全部有效。此前 config 属性错误导致 surface
                 // 一直为 null，eglMakeCurrent(d, null, null, ctx) 在部分驱动上仍返回 1
@@ -294,11 +295,45 @@ mod gles {
                 glClear(GL_COLOR_BUFFER_BIT);
                 glBindTexture(GL_TEXTURE_2D, self.texture);
                 if self.tex_w != w || self.tex_h != h {
+                    // 首帧 / resize：纹理尺寸变化，必须全帧重建。
                     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA as i32, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.as_ptr() as *const _);
                     self.tex_w = w;
                     self.tex_h = h;
                 } else {
-                    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels.as_ptr() as *const _);
+                    let mut full = true;
+                    if let Some(rs) = regions {
+                        // 空列表 / 无人精确标记 / 某矩形覆盖整屏 → 全帧。
+                        full = rs.is_empty() || rs.iter().any(|r| {
+                            r.x <= 0 && r.y <= 0 && r.x + r.w >= w && r.y + r.h >= h
+                        });
+                    }
+                    if full {
+                        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels.as_ptr() as *const _);
+                    } else if let Some(rs) = regions {
+                        let stride = (w * 4) as usize;
+                        for r in rs {
+                            let x = r.x.max(0);
+                            let y = r.y.max(0);
+                            let x2 = (r.x + r.w).min(w);
+                            let y2 = (r.y + r.h).min(h);
+                            if x2 <= x || y2 <= y {
+                                continue;
+                            }
+                            // 帧缓冲每行 stride=w*4，脏区行不连续；ES2 不支持
+                            // GL_UNPACK_ROW_LENGTH，因此按行上传（h=1）。
+                            for row in y..y2 {
+                                let off = row as usize * stride + x as usize * 4;
+                                if off >= pixels.len() {
+                                    break;
+                                }
+                                glTexSubImage2D(
+                                    GL_TEXTURE_2D, 0, x, row, x2 - x, 1,
+                                    GL_RGBA, GL_UNSIGNED_BYTE,
+                                    pixels[off..].as_ptr() as *const _,
+                                );
+                            }
+                        }
+                    }
                 }
                 glUseProgram(self.program);
                 glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -426,8 +461,13 @@ pub fn destroy() {
 #[cfg(target_os = "android")]
 static GL_STATE: std::sync::Mutex<Option<gles::GlState>> = std::sync::Mutex::new(None);
 
-/// 提交一帧：把当前帧缓冲上传并绘制。
+/// 提交一帧：把当前帧缓冲上传并绘制（全帧）。
 pub fn present() {
+    present_regions(None);
+}
+
+/// 局部提交：只上传 `regions` 覆盖的区域；`None` / 空 / 覆盖整屏均按全帧处理。
+pub fn present_regions(regions: Option<&[VaporRect]>) {
     let s = match crate::state::state().lock() {
         Ok(g) => g,
         Err(_) => return,
@@ -435,13 +475,13 @@ pub fn present() {
     #[cfg(target_os = "android")]
     {
         if let Some(gl) = GL_STATE.lock().unwrap().as_mut() {
-            gl.draw(&s.framebuffer, s.width, s.height);
+            gl.draw(&s.framebuffer, s.width, s.height, regions);
         }
     }
     #[cfg(not(target_os = "android"))]
     {
         // 本机验证：仅记录帧提交，不落盘（避免高频 IO）。
-        let _ = (&s.framebuffer, s.width, s.height);
+        let _ = (&s.framebuffer, s.width, s.height, regions);
     }
 }
 

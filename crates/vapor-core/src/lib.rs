@@ -147,6 +147,22 @@ pub extern "C" fn vapor_fb_unlock() -> i32 {
     VAPOR_OK
 }
 
+/// 局部提交：只上传 `rects` 覆盖的区域。
+/// `count <= 0` 或 `rects == NULL` 时按全帧处理，保证默认安全。
+#[no_mangle]
+pub extern "C" fn vapor_fb_present_dirty(rects: *const VaporRect, count: i32) -> i32 {
+    if state::unlock_framebuffer() != VAPOR_OK {
+        return VAPOR_ERR_STATE;
+    }
+    let regions = if count > 0 && !rects.is_null() {
+        Some(unsafe { std::slice::from_raw_parts(rects, count as usize) })
+    } else {
+        None
+    };
+    renderer::present_regions(regions);
+    VAPOR_OK
+}
+
 #[no_mangle]
 pub extern "C" fn vapor_fb_resize(w: i32, h: i32) -> i32 {
     state::resize_fb(w, h)

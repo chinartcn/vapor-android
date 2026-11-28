@@ -109,6 +109,14 @@ typedef struct VaporEvent {
     uint64_t timestamp_ms;
 } VaporEvent;
 
+/* 脏矩形（逻辑像素、左上原点），供 fb_present_dirty 局部上传使用。 */
+typedef struct VaporRect {
+    int32_t x;
+    int32_t y;
+    int32_t w;
+    int32_t h;
+} VaporRect;
+
 /* 全功能函数表：C 扩展通过 init(VaporApi*) 拿到，实现"啥都能调" */
 typedef struct VaporApi {
     int32_t (*abi_version)(void);
@@ -155,6 +163,9 @@ typedef struct VaporApi {
     int32_t (*jni_detach)(void);                /* 从 JVM 分离当前线程 */
     int32_t (*jni_call)(const char* req_json, char* out_json, int32_t cap); /* 通用 JNI 调用，见 docs */
     int32_t (*jni_release)(int64_t handle);     /* 释放 jni_call 返回的全局引用句柄 */
+
+    /* ---- 脏区局部上传（v1.2 追加在尾部，前向兼容） ---- */
+    int32_t (*fb_present_dirty)(const VaporRect* rects, int32_t count);
 } VaporApi;
 
 /* ---------- 稳定导出函数 ---------- */
@@ -168,6 +179,8 @@ int32_t     vapor_fb_lock(VaporFramebuffer* out);
 int32_t     vapor_fb_unlock(void);
 int32_t     vapor_fb_resize(int32_t w, int32_t h);
 int32_t     vapor_fb_clear(uint32_t rgba);
+/* 局部提交：只上传 rects 覆盖的区域；count<=0 或 rects==NULL 等价全帧。 */
+int32_t     vapor_fb_present_dirty(const VaporRect* rects, int32_t count);
 
 int32_t     vapor_poll_event(VaporEvent* out);
 int32_t     vapor_event_count(void);

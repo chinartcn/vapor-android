@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .. import _native
+from .dirty import ledger
 
 _geom = _native.ui
 
@@ -60,10 +61,14 @@ def wrap_text(text, size, max_width) -> list:
 def draw_text(canvas, s, x, y, c, size=16, scale=None):
     """供 Canvas.text 调用：优先自定义渲染器，否则用内置 5x7 点阵。"""
     if _TEXT_RENDERER is not None:
+        # 自定义渲染器范围未知，按全帧兜底，避免漏帧。
+        ledger.mark_full()
         _TEXT_RENDERER(canvas, s, x, y, c, size)
         return
     sc = int(scale) if scale else max(1, int(round(size / 7.0)))
     cx = int(x)
+    # 文本整体外接框（5x7 点阵，字距 6*sc）；先标记再绘制。
+    ledger.mark_rect(cx, int(y), max(0, len(str(s)) * 6 * sc), 7 * sc)
     for ch in str(s):
         rows = _BITMAP_FONT.get(ch.upper())
         if rows is None:

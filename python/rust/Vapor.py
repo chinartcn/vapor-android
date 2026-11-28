@@ -30,6 +30,7 @@ from ._abi import (
     VaporConfig,
     VaporFramebuffer,
     VaporEvent,
+    VaporRect,
 )
 
 # 事件类型常量（与头文件一致）
@@ -129,6 +130,20 @@ def framebuffer() -> memoryview:
 def present() -> int:
     """提交当前帧：Rust 上传纹理并用 GLES 绘制一帧。"""
     return _abi.lib().vapor_fb_unlock()
+
+
+def present_dirty(rects) -> int:
+    """局部提交：只上传 rects 覆盖的区域；rects 为空时退回全帧。"""
+    if not rects:
+        return present()
+    lib = _abi.lib()
+    fn = getattr(lib, "vapor_fb_present_dirty", None)
+    if fn is None:          # 旧版 libvapor 没有该符号
+        return present()
+    arr = (VaporRect * len(rects))(*[
+        VaporRect(int(x), int(y), int(w), int(h)) for x, y, w, h in rects
+    ])
+    return fn(arr, len(rects))
 
 
 def clear(color: int) -> None:

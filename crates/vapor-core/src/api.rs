@@ -15,6 +15,7 @@ extern "C" {
     fn vapor_fb_unlock() -> i32;
     fn vapor_fb_resize(w: i32, h: i32) -> i32;
     fn vapor_fb_clear(rgba: u32) -> i32;
+    fn vapor_fb_present_dirty(rects: *const vapor_abi::VaporRect, count: i32) -> i32;
     fn vapor_poll_event(out: *mut vapor_abi::VaporEvent) -> i32;
     fn vapor_event_count() -> i32;
     fn vapor_set_title(title: *const c_char) -> i32;
@@ -84,5 +85,6 @@ pub fn api_table() -> &'static VaporApi {
         jni_detach: vapor_jni_detach,
         jni_call: vapor_jni_call,
         jni_release: vapor_jni_release,
+        fb_present_dirty: vapor_fb_present_dirty,
     })
 }
