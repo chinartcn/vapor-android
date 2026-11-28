@@ -101,9 +101,11 @@ cargo install cargo-ndk
 > 本轮已在后台下载 commandline-tools 与 NDK r27c 到 artifact 目录；SDK platform/build-tools 留待下一轮安装后即可走完 APK 组装。
 >
 > **CPython 复用**：仓库 `lib/{arm64-v8a,armeabi-v7a}/libpython3.15.so` 是从已构建 APK
-> 提取的正式产物，`scripts/build_cpython.sh` 会优先复用它们——arm32 不再从源码交叉编译
-> （那需要同版本宿主解释器），标准库直接复用 arm64 的纯 Python 部分。需要强制重建时设置
-> `VAPOR_REBUILD_CPYTHON=1`。
+> 提取的正式产物，`scripts/build_cpython.sh` 会优先复用它们。但标准库（含 arm32 的
+> `lib-dynload` 扩展模块如 `math`/`_ctypes`）必须完整打进 APK 才能运行；仓库里没有
+> arm32 的扩展模块，因此默认构建会自动从 3.15.2 源码交叉编译 arm32（先在
+> `build/host-python` 构建同版本宿主解释器，再交给 `--with-build-python`）。
+> 设置 `VAPOR_REBUILD_CPYTHON=1` 可强制重建。
 
 ## 5. 两个 app
 

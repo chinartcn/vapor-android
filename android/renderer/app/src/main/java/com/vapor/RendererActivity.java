@@ -48,13 +48,22 @@ public class RendererActivity extends Activity implements SurfaceHolder.Callback
         super.onCreate(savedInstanceState);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         // 把内置 Python 运行时与逻辑包解压到私有目录，供 Rust 内嵌 CPython 加载。
+        // 标准库有上千个文件，绝不能每次启动都全量重解压；用 APK 的修改时间做版本戳，
+        // 仅在首次安装 / 升级后解压一次（否则低端机启动会被 IO 拖到 ANR）。
         try {
             File files = getFilesDir();
-            copyAssets("python", new File(files, "python"));
-            // 按当前 ABI 把 PyO3 扩展（Vapor._core/_ui/_sdk）复制到 site-packages，
-            // 因为同一个 APK 里两个架构的 .so 同名，只能按机型选一份。
-            copyAssets("python/pyext/" + abiTag(), new File(files, "python/site-packages"));
-            copyAssets("app", new File(files, "app"));
+            File stamp = new File(files, ".vapor_assets_stamp");
+            long apkTime = new File(getPackageCodePath()).lastModified();
+            if (!assetsUpToDate(stamp, apkTime)) {
+                long t0 = System.currentTimeMillis();
+                copyAssets("python", new File(files, "python"));
+                // 按当前 ABI 把 PyO3 扩展（Vapor._core/_ui/_sdk）复制到 site-packages，
+                // 因为同一个 APK 里两个架构的 .so 同名，只能按机型选一份。
+                copyAssets("python/pyext/" + abiTag(), new File(files, "python/site-packages"));
+                copyAssets("app", new File(files, "app"));
+                writeStamp(stamp, apkTime);
+                android.util.Log.i("vapor", "assets 解压完成 " + (System.currentTimeMillis() - t0) + "ms");
+            }
         } catch (IOException e) {
             android.util.Log.e("vapor", "解压 assets 失败", e);
         }
@@ -186,6 +195,28 @@ public class RendererActivity extends Activity implements SurfaceHolder.Callback
             }
         }
         return "armeabi-v7a";
+    }
+
+    /** assets 是否已按当前 APK 版本解压过（用 APK 修改时间作为版本戳）。 */
+    private boolean assetsUpToDate(File stamp, long apkTime) {
+        if (!stamp.isFile()) return false;
+        try (InputStream in = new java.io.FileInputStream(stamp)) {
+            byte[] buf = new byte[64];
+            int n = in.read(buf);
+            if (n <= 0) return false;
+            String got = new String(buf, 0, n, "UTF-8").trim();
+            return got.equals(Long.toString(apkTime));
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    private void writeStamp(File stamp, long apkTime) {
+        try (OutputStream out = new FileOutputStream(stamp)) {
+            out.write(Long.toString(apkTime).getBytes("UTF-8"));
+        } catch (IOException e) {
+            android.util.Log.w("vapor", "写入 assets 版本戳失败", e);
+        }
     }
 
     /** 递归复制 assets 子目录到目标路径。 */

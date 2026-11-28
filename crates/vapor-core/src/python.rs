@@ -196,10 +196,28 @@ pub fn py_init(app_dir: *const c_char) -> i32 {
     let builtin = bundled_python_home();
     let mut paths: Vec<String> = Vec::new();
     if !builtin.is_empty() {
+        // 诊断：stdlib 缺失时明确告警（历史上 APK 只带了 libpython，没带标准库，
+        // 导致 `import math` 直接 ModuleNotFoundError，整个 Vapor.ui 回退链崩溃）。
+        let stdlib_os = format!("{builtin}/stdlib/os.py");
+        if !std::path::Path::new(&stdlib_os).exists() {
+            crate::log::log_msg(
+                crate::log::LOG_ERROR,
+                &format!("内置 CPython 标准库缺失（{stdlib_os} 不存在），请检查 APK 的 assets/python/stdlib"),
+            );
+        }
         // stdlib 必须显式加入：PYTHONPATH 会被前置到 sys.path。
         paths.push(format!("{builtin}/stdlib"));
-        paths.push(format!("{builtin}/stdlib/lib-dynload_arm64"));
-        paths.push(format!("{builtin}/stdlib/lib-dynload_arm32"));
+        // lib-dynload 按当前进程 ABI 选择：fat APK 里 arm64/arm32 两套 .so 分开存放，
+        // 若把另一个 ABI 的目录排在前面，arm32 设备会命中 arm64 的 math.so 等，
+        // 报 wrong ELF class 或直接找不到模块。
+        let dynload = if cfg!(target_pointer_width = "64") {
+            "lib-dynload_arm64"
+        } else {
+            "lib-dynload_arm32"
+        };
+        paths.push(format!("{builtin}/stdlib/{dynload}"));
+        // 兼容单架构部署 / 普通 CPython 安装树（Lib/lib-dynload）。
+        paths.push(format!("{builtin}/stdlib/lib-dynload"));
         paths.push(builtin.clone()); // rust.Vapor 包所在目录
         paths.push(format!("{builtin}/site-packages"));
     }

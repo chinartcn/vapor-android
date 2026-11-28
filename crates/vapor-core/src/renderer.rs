@@ -55,6 +55,13 @@ mod gles {
         pub fn glEnableVertexAttribArray(idx: u32);
         pub fn glVertexAttribPointer(idx: u32, size: i32, ty: u32, norm: u8, stride: i32, ptr: *const c_void);
         pub fn glDrawArrays(mode: u32, first: i32, count: i32);
+        // 着色器诊断：编译/链接失败时把驱动返回的 info log 打出来，
+        // 否则真机上只会看到黑屏 + 驱动侧的 "Failed to compile shader"。
+        pub fn glGetShaderiv(shader: u32, pname: u32, out: *mut i32);
+        pub fn glGetShaderInfoLog(shader: u32, buf_size: i32, length: *mut i32, info: *mut i8);
+        pub fn glGetProgramiv(prog: u32, pname: u32, out: *mut i32);
+        pub fn glGetProgramInfoLog(prog: u32, buf_size: i32, length: *mut i32, info: *mut i8);
+        pub fn glBindAttribLocation(prog: u32, index: u32, name: *const i8);
     }
 
     pub const GL_TEXTURE_2D: u32 = 0x0DE1;
@@ -73,7 +80,10 @@ mod gles {
     pub const GL_TRIANGLE_STRIP: u32 = 0x0005;
     pub const GL_VERTEX_SHADER: u32 = 0x8B31;
     pub const GL_FRAGMENT_SHADER: u32 = 0x8B30;
+    pub const GL_COMPILE_STATUS: u32 = 0x8B81;
+    pub const GL_LINK_STATUS: u32 = 0x8B82;
     pub const EGL_OPENGL_ES3_BIT: i32 = 0x00000040;
+    pub const EGL_OPENGL_ES2_BIT: i32 = 0x00000004;
     // EGL 属性 key（此前把 EGL_SURFACE_TYPE=0x3033 误当成 EGL_RENDERABLE_TYPE，
     // 导致 eglChooseConfig 选不到支持 window 的 config，surface 一直为 null）。
     pub const EGL_RENDERABLE_TYPE: i32 = 0x3040;
@@ -100,31 +110,56 @@ mod gles {
     // EGL 句柄是进程级不透明指针；GL_STATE 只在渲染线程访问，Mutex 已保证互斥。
     unsafe impl Send for GlState {}
 
-    const VS: &str = "#version 300 es\n\
+    const VS_ES3: &str = "#version 300 es\n\
         in vec2 aPos;\n\
         in vec2 aUV;\n\
         out vec2 vUV;\n\
         void main(){ vUV=aUV; gl_Position=vec4(aPos,0.0,1.0); }";
 
-    const FS: &str = "#version 300 es\n\
+    const FS_ES3: &str = "#version 300 es\n\
         precision mediump float;\n\
         in vec2 vUV;\n\
         uniform sampler2D uTex;\n\
         out vec4 frag;\n\
         void main(){ frag=texture(uTex, vUV); }";
 
-    fn compile(ty: u32, src: &str) -> u32 {
+    // ES2 回退：部分老驱动（尤其低端 arm32 机型）只有 GLES2 上下文，
+    // 给它喂 `#version 300 es` 会直接编译失败 → 黑屏。
+    const VS_ES2: &str = "attribute vec2 aPos;\n\
+        attribute vec2 aUV;\n\
+        varying vec2 vUV;\n\
+        void main(){ vUV=aUV; gl_Position=vec4(aPos,0.0,1.0); }";
+
+    const FS_ES2: &str = "precision mediump float;\n\
+        varying vec2 vUV;\n\
+        uniform sampler2D uTex;\n\
+        void main(){ gl_FragColor=texture2D(uTex, vUV); }";
+
+    fn compile(ty: u32, src: &str, tag: &str) -> u32 {
         unsafe {
             let sh = glCreateShader(ty);
             let p = src.as_ptr() as *const i8;
             glShaderSource(sh, 1, &p, std::ptr::null());
             glCompileShader(sh);
+            let mut ok = 0i32;
+            glGetShaderiv(sh, GL_COMPILE_STATUS, &mut ok);
+            if ok == 0 {
+                let mut buf = vec![0i8; 4096];
+                let mut len = 0i32;
+                glGetShaderInfoLog(sh, buf.len() as i32, &mut len, buf.as_mut_ptr());
+                let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+                let bytes: Vec<u8> = buf[..end].iter().map(|&c| c as u8).collect();
+                log_msg(
+                    crate::log::LOG_ERROR,
+                    &format!("{tag} 着色器编译失败: {}", String::from_utf8_lossy(&bytes)),
+                );
+            }
             sh
         }
     }
 
     impl GlState {
-        pub fn new(display: EGLDisplay, surface: EGLSurface, context: EGLContext) -> Self {
+        pub fn new(display: EGLDisplay, surface: EGLSurface, context: EGLContext, es3: bool) -> Self {
             unsafe {
                 eglMakeCurrent(display, surface, surface, context);
                 let mut tex = 0u32;
@@ -135,12 +170,30 @@ mod gles {
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as i32);
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as i32);
 
-                let vs = compile(GL_VERTEX_SHADER, VS);
-                let fs = compile(GL_FRAGMENT_SHADER, FS);
+                let (vs_src, fs_src) = if es3 { (VS_ES3, FS_ES3) } else { (VS_ES2, FS_ES2) };
+                let vs = compile(GL_VERTEX_SHADER, vs_src, "vertex");
+                let fs = compile(GL_FRAGMENT_SHADER, fs_src, "fragment");
                 let prog = glCreateProgram();
                 glAttachShader(prog, vs);
                 glAttachShader(prog, fs);
+                // 不依赖驱动默认的属性槽位：显式绑定到 0/1，避免不同 GPU 上
+                // 位置/UV 被分到别的 location 导致画面错乱。
+                glBindAttribLocation(prog, 0, b"aPos\0".as_ptr() as *const i8);
+                glBindAttribLocation(prog, 1, b"aUV\0".as_ptr() as *const i8);
                 glLinkProgram(prog);
+                let mut linked = 0i32;
+                glGetProgramiv(prog, GL_LINK_STATUS, &mut linked);
+                if linked == 0 {
+                    let mut buf = vec![0i8; 4096];
+                    let mut len = 0i32;
+                    glGetProgramInfoLog(prog, buf.len() as i32, &mut len, buf.as_mut_ptr());
+                    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+                    let bytes: Vec<u8> = buf[..end].iter().map(|&c| c as u8).collect();
+                    log_msg(
+                        crate::log::LOG_ERROR,
+                        &format!("GL 程序链接失败: {}", String::from_utf8_lossy(&bytes)),
+                    );
+                }
                 glUseProgram(prog);
                 let loc = glGetUniformLocation(prog, b"uTex\0".as_ptr() as *const i8);
                 glUniform1i(loc, 0);
@@ -226,7 +279,7 @@ pub fn init_from_window(window: *mut std::ffi::c_void) {
         // 旧代码用 0x3033 + EGL_OPENGL_ES3_BIT(0x40) 作为唯一属性，等于请求一个
         // 值为 0x40 的 surface type（非法），eglChooseConfig 选不到 window config，
         // 后续 eglCreateWindowSurface 返回 EGL_NO_SURFACE → 黑屏 + EGL_BAD_SURFACE。
-        let attrs = [
+        let attrs_es3 = [
             EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
             EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
             EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
@@ -234,9 +287,21 @@ pub fn init_from_window(window: *mut std::ffi::c_void) {
         ];
         let mut cfg: EGLDisplay = std::ptr::null_mut();
         let mut n = 0;
-        if eglChooseConfig(d, attrs.as_ptr(), &mut cfg, 1, &mut n) == 0 || n < 1 || cfg.is_null() {
-            log_msg(LOG_INFO, &format!("EGL eglChooseConfig 失败 n={n} err=0x{:x}", eglGetError()));
-            return;
+        let mut es3 = true;
+        if eglChooseConfig(d, attrs_es3.as_ptr(), &mut cfg, 1, &mut n) == 0 || n < 1 || cfg.is_null() {
+            // 老设备可能完全没有 ES3 可渲染配置，退到 ES2 再选一次。
+            log_msg(LOG_INFO, &format!("EGL ES3 配置不可用 err=0x{:x}，回退 ES2", eglGetError()));
+            let attrs_es2 = [
+                EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+                EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+                EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+                EGL_NONE,
+            ];
+            es3 = false;
+            if eglChooseConfig(d, attrs_es2.as_ptr(), &mut cfg, 1, &mut n) == 0 || n < 1 || cfg.is_null() {
+                log_msg(LOG_INFO, &format!("EGL eglChooseConfig 失败 n={n} err=0x{:x}", eglGetError()));
+                return;
+            }
         }
 
         let surf = eglCreateWindowSurface(d, cfg, window, std::ptr::null());
@@ -244,10 +309,11 @@ pub fn init_from_window(window: *mut std::ffi::c_void) {
             log_msg(LOG_INFO, &format!("EGL eglCreateWindowSurface 失败 err=0x{:x}", eglGetError()));
             return;
         }
-        let ctx_attrs = [EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE];
+        let ctx_attrs = [EGL_CONTEXT_CLIENT_VERSION, if es3 { 3 } else { 2 }, EGL_NONE];
         let mut ctx = eglCreateContext(d, cfg, std::ptr::null_mut(), ctx_attrs.as_ptr());
-        if ctx.is_null() {
+        if ctx.is_null() && es3 {
             // ES3 上下文创建失败，回退 ES2（部分老驱动只支持 ES2）。
+            es3 = false;
             let ctx_attrs2 = [EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE];
             ctx = eglCreateContext(d, cfg, std::ptr::null_mut(), ctx_attrs2.as_ptr());
             log_msg(LOG_INFO, "EGL ES3 context 失败，回退 ES2");
@@ -258,10 +324,10 @@ pub fn init_from_window(window: *mut std::ffi::c_void) {
         }
         // 诊断：确认 surface/context/display 均有效后再初始化 GL 资源。
         log_msg(LOG_INFO, &format!(
-            "EGL 就绪 d={:p} surf={:p} ctx={:p} es={}x{}",
-            d, surf, ctx, maj, min
+            "EGL 就绪 d={:p} surf={:p} ctx={:p} es={}x{} gles={}",
+            d, surf, ctx, maj, min, if es3 { 3 } else { 2 }
         ));
-        let gl = GlState::new(d, surf, ctx);
+        let gl = GlState::new(d, surf, ctx, es3);
         GL_STATE.lock().unwrap().replace(gl);
     }
 }
