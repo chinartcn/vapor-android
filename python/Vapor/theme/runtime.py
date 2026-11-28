@@ -9,23 +9,9 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 from .. import core
+from .tokens import ROLE_NAMES
 
 __all__ = ["Theme", "current_theme", "set_theme", "use_theme", "THEME_KEY", "ROLE_NAMES"]
-
-# 文档 1（tokens.py）尚未合入时的 fallback；两处必须逐字一致。
-try:  # pragma: no cover - 文档 1 合入后走权威来源
-    from .tokens import ROLE_NAMES  # type: ignore
-except ImportError:  # pragma: no cover
-    ROLE_NAMES = (
-        "primary", "onPrimary", "primaryContainer", "onPrimaryContainer",
-        "secondary", "onSecondary", "secondaryContainer", "onSecondaryContainer",
-        "tertiary", "onTertiary", "tertiaryContainer", "onTertiaryContainer",
-        "error", "onError", "errorContainer", "onErrorContainer",
-        "background", "onBackground",
-        "surface", "onSurface", "surfaceVariant", "onSurfaceVariant",
-        "outline", "outlineVariant",
-        "shadow", "scrim",
-    )
 
 THEME_KEY = "vapor.theme"
 _CONTRAST_LEVELS = ("standard", "medium", "high")
