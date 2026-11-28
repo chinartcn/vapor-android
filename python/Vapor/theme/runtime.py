@@ -9,9 +9,24 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 from .. import core
-from .tokens import ROLE_NAMES
 
 __all__ = ["Theme", "current_theme", "set_theme", "use_theme", "THEME_KEY", "ROLE_NAMES"]
+
+# 文档 1 合入后走权威来源；fallback 仅在 tokens.py 缺失时兜底。
+_FALLBACK_ROLES = (
+    "primary", "onPrimary", "primaryContainer", "onPrimaryContainer",
+    "secondary", "onSecondary", "secondaryContainer", "onSecondaryContainer",
+    "tertiary", "onTertiary", "tertiaryContainer", "onTertiaryContainer",
+    "error", "onError", "errorContainer", "onErrorContainer",
+    "surface", "onSurface", "onSurfaceVariant",
+    "surfaceContainerLowest", "surfaceContainerLow", "surfaceContainer",
+    "surfaceContainerHigh", "surfaceContainerHighest",
+    "outline", "outlineVariant",
+)
+try:  # pragma: no cover - 文档 1 合入后走权威来源
+    from .tokens import ROLE_NAMES  # type: ignore
+except ImportError:  # pragma: no cover
+    ROLE_NAMES = _FALLBACK_ROLES
 
 THEME_KEY = "vapor.theme"
 _CONTRAST_LEVELS = ("standard", "medium", "high")

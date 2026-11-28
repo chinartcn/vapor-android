@@ -77,7 +77,7 @@ _LIGHT = {
     "errorContainer": ("error", 90), "onErrorContainer": ("error", 10),
     "background": ("neutral", 99), "onBackground": ("neutral", 10),
     "surface": ("neutral", 99), "onSurface": ("neutral", 10),
-    "surfaceVariant": ("neutralVariant", 90), "onSurfaceVariant": ("neutralVariant", 30),
+    "onSurfaceVariant": ("neutralVariant", 30),
     "outline": ("neutralVariant", 50), "outlineVariant": ("neutralVariant", 80),
     "shadow": ("neutral", 0), "scrim": ("neutral", 0),
     # 文档 1 若扩展了角色，这里也覆盖，避免 KeyError。
@@ -101,7 +101,7 @@ _DARK = {
     "errorContainer": ("error", 30), "onErrorContainer": ("error", 90),
     "background": ("neutral", 10), "onBackground": ("neutral", 90),
     "surface": ("neutral", 10), "onSurface": ("neutral", 90),
-    "surfaceVariant": ("neutralVariant", 30), "onSurfaceVariant": ("neutralVariant", 80),
+    "onSurfaceVariant": ("neutralVariant", 80),
     "outline": ("neutralVariant", 60), "outlineVariant": ("neutralVariant", 30),
     "shadow": ("neutral", 0), "scrim": ("neutral", 0),
     "surfaceTint": ("primary", 80),

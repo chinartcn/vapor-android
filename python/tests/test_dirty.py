@@ -97,3 +97,30 @@ def test_singleton_contract():
     ledger.end_frame()
     assert isinstance(ledger.is_full, bool)
     assert ledger.rects() == []
+
+
+def test_new_app_forces_full_first_frame():
+    """新 App 同尺寸挂载时也必须全帧重绘，避免复用上个 App 的脏区状态。"""
+    from Vapor.ui import Component
+    from Vapor.ui.app import App
+
+    class _Root(Component):
+        name = "DirtyRoot"
+
+        @staticmethod
+        def build(r, props, slots):
+            return [r.element("view", {"w": 16, "h": 16, "bg": 0xFF112233})]
+
+    # 模拟上一个 App 跑完一帧后的状态：full 已复位。
+    ledger.set_canvas(32, 32)
+    ledger.begin_frame()
+    ledger.mark_full()
+    ledger.end_frame()
+    assert ledger.is_full is False
+
+    app = App(_Root, width=32, height=32, dirty_rects=True)
+    app.tick = lambda now=None: app       # 隔离首帧 tick，只看 mount 的账本复位
+    app.mount()
+
+    assert ledger.is_full is True
+    assert (ledger.w, ledger.h) == (32, 32)

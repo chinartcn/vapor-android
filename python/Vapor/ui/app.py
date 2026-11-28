@@ -49,6 +49,11 @@ class App:
         if self.surface is None:
             self.surface = Surface(self.width, self.height)
         self.width, self.height = self.surface.width, self.surface.height
+        # 账本是进程级单例：新 App 挂载时清掉上一个 App 的残留状态，
+        # 并强制首帧全帧绘制（尺寸相同不会再触发 set_canvas 的 full）。
+        ledger.set_canvas(self.width, self.height)
+        ledger.begin_frame()
+        ledger.mark_full()
         self.registry_component(self.root_component)
         self.renderer.app = self
         self.root = self.root_component.instantiate(self.renderer, {}, {})

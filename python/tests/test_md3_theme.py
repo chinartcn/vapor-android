@@ -16,6 +16,21 @@ from Vapor.theme import (
     set_theme,
     use_theme,
 )
+from Vapor.theme.runtime import _FALLBACK_ROLES
+
+
+def test_fallback_roles_match_authoritative():
+    """fallback 必须与文档 1 的 26 角色逐字一致（B 类回归）。"""
+    assert _FALLBACK_ROLES == ROLE_NAMES
+    assert "surfaceVariant" not in ROLE_NAMES
+    assert "surfaceContainerHighest" in ROLE_NAMES
+
+
+def test_scheme_has_no_surface_variant():
+    for dark in (False, True):
+        scheme = seed_to_scheme(0xFF6750A4, dark=dark)
+        assert "surfaceVariant" not in scheme.colors
+        assert "surfaceContainerHighest" in scheme.colors
 
 
 def test_role_roundtrip():
