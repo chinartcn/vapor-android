@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vapor-runtime"
-version = "1.0.0"
-description = "Vapor 渲染器内置 Python 基础渲染 API（rust.Vapor）"
+version = "2.0.0"
+description = "Vapor 内置 Python 包：rust.Vapor（共享内存渲染 API）+ Vapor（响应式 UI 框架）"
 authors = [{ name = "Vapor Project" }]
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 
 [tool.setuptools]
-packages = ["rust"]
+packages = ["rust", "Vapor"]
 
 [tool.setuptools.package-data]
 rust = ["*.pyi", "libvapor.so"]
+Vapor = ["*.py"]

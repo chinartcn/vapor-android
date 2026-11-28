@@ -77,20 +77,23 @@ jobs:
           args: --release --out dist
           manylinux: auto
 
-      - name: 安装三个 wheel
+      - name: 构建纯 Python 包（Vapor + rust）
+        run: python -m pip wheel ./python --no-deps -w dist-py
+
+      - name: 安装四个 wheel（3 个扩展 + 1 个纯 Python）
         shell: bash
         run: |
           python -m pip install --no-deps \
             rust/vapor-reactive/dist/*.whl \
             rust/vapor-ui/dist/*.whl \
-            rust/vapor-sdk/dist/*.whl
+            rust/vapor-sdk/dist/*.whl \
+            dist-py/*.whl
 
-      - name: 诊断 wheel 内容
+      - name: 诊断安装结果
         shell: bash
         run: |
-          python -m zipfile -l rust/vapor-reactive/dist/*.whl | head -25
-          python -c "import Vapor; print('file=', Vapor.__file__); print('path=', getattr(Vapor, '__path__', None)); print('attrs=', sorted(n for n in dir(Vapor) if not n.startswith('_')))"
-          python -m pip show -f vapor-reactive 2>/dev/null | head -30 || true
+          python -c "import Vapor; print('file=', Vapor.__file__); print('attrs=', sorted(n for n in dir(Vapor) if not n.startswith('_')))"
+          python -m pip list 2>/dev/null | grep -i vapor || true
 
       - name: 确认用的是 Rust 实现
         run: python -c "import Vapor; s=Vapor.status(); print(s); assert s['core']=='rust' and s['ui']=='rust', s"
@@ -183,6 +186,8 @@ jobs:
           args: --release --out dist --strip
           target: ${{ matrix.target }}
           manylinux: auto
+      - name: 构建纯 Python wheel
+        run: python -m pip wheel ./python --no-deps -w dist-py
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.target }}
@@ -190,3 +195,4 @@ jobs:
             rust/vapor-reactive/dist/*.whl
             rust/vapor-ui/dist/*.whl
             rust/vapor-sdk/dist/*.whl
+            dist-py/*.whl
