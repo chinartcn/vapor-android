@@ -92,8 +92,9 @@ jobs:
       - name: 诊断安装结果
         shell: bash
         run: |
-          python -c "import Vapor; print('file=', Vapor.__file__); print('attrs=', sorted(n for n in dir(Vapor) if not n.startswith('_')))"
-          python -m pip list 2>/dev/null | grep -i vapor || true
+          python -c "import os, Vapor; d=os.path.dirname(Vapor.__file__); print('dir=', d); print('files=', sorted(os.listdir(d)))"
+          python -c "import importlib.util as u; print('spec=', u.find_spec('Vapor._core'))"
+          python -m pip show -f vapor-reactive 2>/dev/null | head -20 || true
 
       - name: 确认用的是 Rust 实现
         run: python -c "import Vapor; s=Vapor.status(); print(s); assert s['core']=='rust' and s['ui']=='rust', s"
