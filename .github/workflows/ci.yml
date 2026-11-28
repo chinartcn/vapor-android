@@ -85,6 +85,13 @@ jobs:
             rust/vapor-ui/dist/*.whl \
             rust/vapor-sdk/dist/*.whl
 
+      - name: 诊断 wheel 内容
+        shell: bash
+        run: |
+          python -m zipfile -l rust/vapor-reactive/dist/*.whl | head -25
+          python -c "import Vapor; print('file=', Vapor.__file__); print('path=', getattr(Vapor, '__path__', None)); print('attrs=', sorted(n for n in dir(Vapor) if not n.startswith('_')))"
+          python -m pip show -f vapor-reactive 2>/dev/null | head -30 || true
+
       - name: 确认用的是 Rust 实现
         run: python -c "import Vapor; s=Vapor.status(); print(s); assert s['core']=='rust' and s['ui']=='rust', s"
 
