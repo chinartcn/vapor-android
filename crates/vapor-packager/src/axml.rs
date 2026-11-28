@@ -21,6 +21,15 @@ fn u16at(b: &[u8], p: usize) -> u16 {
 fn u32at(b: &[u8], p: usize) -> u32 {
     u32::from_le_bytes([b[p], b[p + 1], b[p + 2], b[p + 3]])
 }
+/// 越界安全的读取：畸形 APK 不应让解析器 panic（跨 JNI panic 会 abort 进程）。
+fn get_u16(b: &[u8], p: usize) -> Option<u16> {
+    let s = b.get(p..p.checked_add(2)?)?;
+    Some(u16::from_le_bytes([s[0], s[1]]))
+}
+fn get_u32(b: &[u8], p: usize) -> Option<u32> {
+    let s = b.get(p..p.checked_add(4)?)?;
+    Some(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+}
 fn put_u16(b: &mut [u8], p: usize, v: u16) {
     b[p..p + 2].copy_from_slice(&v.to_le_bytes());
 }
@@ -28,15 +37,15 @@ fn put_u32(b: &mut [u8], p: usize, v: u32) {
     b[p..p + 4].copy_from_slice(&v.to_le_bytes());
 }
 
-fn decode_len8(b: &[u8], p: &mut usize) -> usize {
-    let first = b[*p] as usize;
+fn decode_len8(b: &[u8], p: &mut usize) -> Option<usize> {
+    let first = *b.get(*p)? as usize;
     *p += 1;
     if first & 0x80 != 0 {
-        let v = ((first & 0x7F) << 8) | (b[*p] as usize);
+        let second = *b.get(*p)? as usize;
         *p += 1;
-        v
+        Some(((first & 0x7F) << 8) | second)
     } else {
-        first
+        Some(first)
     }
 }
 
@@ -61,38 +70,50 @@ impl Str {
     }
 }
 
-/// 解析 string pool 的字符串列表。
-fn parse_strings(chunk: &[u8]) -> Vec<Str> {
-    let header_size = u16at(chunk, 2) as usize;
-    let string_count = u32at(chunk, 8) as usize;
-    let flags = u32at(chunk, 16);
-    let strings_start = u32at(chunk, 20) as usize;
+/// 解析 string pool 的字符串列表；任何越界都返回 Err 而不是 panic。
+fn parse_strings(chunk: &[u8]) -> Result<Vec<Str>, String> {
+    if chunk.len() < 28 {
+        return Err("string pool 过短".into());
+    }
+    let header_size = get_u16(chunk, 2).ok_or("string pool header 越界")? as usize;
+    let string_count = get_u32(chunk, 8).ok_or("string pool 头越界")? as usize;
+    let flags = get_u32(chunk, 16).ok_or("string pool 头越界")?;
+    let strings_start = get_u32(chunk, 20).ok_or("string pool 头越界")? as usize;
+    if header_size < 28
+        || header_size.checked_add(string_count.saturating_mul(4)).map_or(true, |e| e > chunk.len())
+        || strings_start > chunk.len()
+    {
+        return Err("string pool 偏移越界".into());
+    }
     let utf8 = flags & UTF8_FLAG != 0;
-    let mut out = Vec::with_capacity(string_count);
+    let mut out = Vec::with_capacity(string_count.min(65_536));
     for i in 0..string_count {
-        let off = u32at(chunk, header_size + i * 4) as usize;
-        let mut p = strings_start + off;
+        let off = get_u32(chunk, header_size + i * 4).ok_or("string offset 越界")? as usize;
+        let mut p = strings_start.checked_add(off).ok_or("string offset 溢出")?;
         if p >= chunk.len() {
             out.push(if utf8 { Str::Utf8(String::new()) } else { Str::Utf16(String::new()) });
             continue;
         }
         if utf8 {
-            let _char_len = decode_len8(chunk, &mut p);
-            let byte_len = decode_len8(chunk, &mut p);
-            let s = String::from_utf8_lossy(&chunk[p..p + byte_len]).into_owned();
-            out.push(Str::Utf8(s));
+            let _char_len = decode_len8(chunk, &mut p).ok_or("UTF-8 长度越界")?;
+            let byte_len = decode_len8(chunk, &mut p).ok_or("UTF-8 长度越界")?;
+            let end = p.checked_add(byte_len).ok_or("UTF-8 长度溢出")?;
+            let bytes = chunk.get(p..end).ok_or("UTF-8 字符串越界")?;
+            out.push(Str::Utf8(String::from_utf8_lossy(bytes).into_owned()));
         } else {
-            let mut len = u16at(chunk, p) as usize;
+            let mut len = get_u16(chunk, p).ok_or("UTF-16 长度越界")? as usize;
             p += 2;
             if len & 0x8000 != 0 {
-                len = ((len & 0x7FFF) << 16) | (u16at(chunk, p) as usize);
+                len = ((len & 0x7FFF) << 16) | (get_u16(chunk, p).ok_or("UTF-16 长度越界")? as usize);
                 p += 2;
             }
-            let units: Vec<u16> = (0..len).map(|k| u16at(chunk, p + k * 2)).collect();
+            let end = p.checked_add(len.checked_mul(2).ok_or("UTF-16 长度溢出")?).ok_or("UTF-16 长度溢出")?;
+            let bytes = chunk.get(p..end).ok_or("UTF-16 字符串越界")?;
+            let units: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
             out.push(Str::Utf16(String::from_utf16_lossy(&units)));
         }
     }
-    out
+    Ok(out)
 }
 
 fn encode_string(s: &Str, utf8: bool, out: &mut Vec<u8>) {
@@ -121,21 +142,23 @@ fn encode_string(s: &Str, utf8: bool, out: &mut Vec<u8>) {
 }
 
 /// 重建 string pool chunk，保持字符串索引与顺序不变。
-fn rebuild_pool(chunk: &[u8], strings: &[Str]) -> Vec<u8> {
-    let header_size = u16at(chunk, 2) as usize;
+fn rebuild_pool(chunk: &[u8], strings: &[Str]) -> Result<Vec<u8>, String> {
+    if chunk.len() < 28 {
+        return Err("string pool 过短".into());
+    }
+    let header_size = get_u16(chunk, 2).ok_or("string pool header 越界")? as usize;
     let string_count = strings.len();
-    let style_count = u32at(chunk, 12) as usize;
-    let flags = u32at(chunk, 16);
+    let style_count = get_u32(chunk, 12).ok_or("string pool 头越界")? as usize;
+    let flags = get_u32(chunk, 16).ok_or("string pool 头越界")?;
     let utf8 = flags & UTF8_FLAG != 0;
-    let old_strings_start = u32at(chunk, 20) as usize;
-    let old_size = u32at(chunk, 4) as usize;
+    let old_strings_start = get_u32(chunk, 20).ok_or("string pool 头越界")? as usize;
+    let old_size = (get_u32(chunk, 4).ok_or("string pool 头越界")? as usize).min(chunk.len());
 
     // 保留原 style 数据（若有）
     let old_offsets_end = header_size + string_count * 4;
-    let old_styles_start = u32at(chunk, 24) as usize;
-    let style_bytes: Vec<u8> = if style_count > 0 && old_styles_start >= old_strings_start {
-        let start = old_styles_start.min(old_size);
-        chunk[start..old_size].to_vec()
+    let old_styles_start = get_u32(chunk, 24).ok_or("string pool 头越界")? as usize;
+    let style_bytes: Vec<u8> = if style_count > 0 && old_styles_start >= old_strings_start && old_styles_start <= old_size {
+        chunk[old_styles_start..old_size].to_vec()
     } else {
         // 兼容 style 数据紧随字符串区但 styleCount=0 的情形：不保留。
         let _ = old_offsets_end;
@@ -167,34 +190,40 @@ fn rebuild_pool(chunk: &[u8], strings: &[Str]) -> Vec<u8> {
         let s = strings_start + data.len();
         out[s..s + style_bytes.len()].copy_from_slice(&style_bytes);
     }
-    out
+    Ok(out)
 }
 
 /// 遍历 AXML 的 START_ELEMENT 属性，修改 android:versionCode。
 fn patch_version_code(chunk: &mut [u8], strings: &[Str], manifest_name_idx: usize, new_code: u32) {
     let mut p = 8usize; // 跳过 RES_XML_TYPE header
-    let total = u32at(chunk, 4) as usize;
+    let total = match get_u32(chunk, 4) {
+        Some(t) => (t as usize).min(chunk.len()),
+        None => return,
+    };
     while p + 8 <= total {
-        let ty = u16at(chunk, p);
-        let header_size = u16at(chunk, p + 2) as usize;
-        let size = u32at(chunk, p + 4) as usize;
-        if size < 8 || p + size > total {
+        let ty = match get_u16(chunk, p) { Some(v) => v, None => break };
+        let header_size = match get_u16(chunk, p + 2) { Some(v) => v as usize, None => break };
+        let size = match get_u32(chunk, p + 4) { Some(v) => v as usize, None => break };
+        if size < 8 || p.checked_add(size).map_or(true, |e| e > total) {
             break;
         }
         if ty == RES_XML_START_ELEMENT_TYPE && size >= 36 {
             // ResXMLTree_attrExt 从 p+header_size 开始
-            let a = p + header_size;
-            let name_idx = u32at(chunk, a + 4) as usize;
-            let attr_start = u16at(chunk, a + 8) as usize;
-            let attr_size = u16at(chunk, a + 10) as usize;
-            let attr_count = u16at(chunk, a + 12) as usize;
+            let a = match p.checked_add(header_size) { Some(v) => v, None => break };
+            let name_idx = match get_u32(chunk, a + 4) { Some(v) => v as usize, None => break };
+            let attr_start = match get_u16(chunk, a + 8) { Some(v) => v as usize, None => break };
+            let attr_size = match get_u16(chunk, a + 10) { Some(v) => v as usize, None => break };
+            let attr_count = match get_u16(chunk, a + 12) { Some(v) => v as usize, None => break };
             if name_idx == manifest_name_idx && attr_size >= 20 {
                 for i in 0..attr_count {
-                    let ap = a + attr_start + i * attr_size;
-                    if ap + 20 > p + size {
+                    let ap = match a.checked_add(attr_start).and_then(|x| x.checked_add(i.checked_mul(attr_size)?)) {
+                        Some(v) => v,
+                        None => break,
+                    };
+                    if ap.checked_add(20).map_or(true, |e| e > p + size || e > chunk.len()) {
                         break;
                     }
-                    let aname_idx = u32at(chunk, ap + 4) as usize;
+                    let aname_idx = match get_u32(chunk, ap + 4) { Some(v) => v as usize, None => break };
                     let aname = strings.get(aname_idx).map(|s| s.as_str()).unwrap_or("");
                     if aname == "versionCode" {
                         // Res_value(typedValue) 在 attr 内偏移 12:
@@ -230,7 +259,7 @@ pub fn patch_manifest(
         return Ok(out.into_bytes());
     }
     // 找到 string pool chunk
-    let total = u32at(axml, 4) as usize;
+    let total = (u32at(axml, 4) as usize).min(axml.len());
     let mut pool_pos = None;
     let mut p = 8usize;
     while p + 8 <= total {
@@ -246,7 +275,7 @@ pub fn patch_manifest(
         p += size;
     }
     let (pool_p, pool_size) = pool_pos.ok_or("未找到 string pool")?;
-    let mut strings = parse_strings(&axml[pool_p..pool_p + pool_size]);
+    let mut strings = parse_strings(&axml[pool_p..pool_p + pool_size])?;
 
     // 找到 "manifest" 元素名索引（用于 versionCode 定位）
     let manifest_idx = strings.iter().position(|s| s.as_str() == "manifest").unwrap_or(usize::MAX);
@@ -260,7 +289,7 @@ pub fn patch_manifest(
         }
     }
 
-    let new_pool = rebuild_pool(&axml[pool_p..pool_p + pool_size], &strings);
+    let new_pool = rebuild_pool(&axml[pool_p..pool_p + pool_size], &strings)?;
     let delta = new_pool.len() as i64 - pool_size as i64;
     let mut out = Vec::with_capacity((total as i64 + delta) as usize);
     out.extend_from_slice(&axml[..pool_p]);
@@ -309,7 +338,7 @@ mod tests {
             let mut v = Vec::new();
             encode_len8(n, &mut v);
             let mut p = 0;
-            assert_eq!(decode_len8(&v, &mut p), n);
+            assert_eq!(decode_len8(&v, &mut p), Some(n));
         }
     }
 
@@ -385,7 +414,7 @@ mod tests {
         // 解析回字符串，确认替换生效
         // 找到 string pool
         let pool_size = u32at(&patched, 8 + 4) as usize;
-        let strings = parse_strings(&patched[8..8 + pool_size]);
+        let strings = parse_strings(&patched[8..8 + pool_size]).unwrap();
         let vals: Vec<&str> = strings.iter().map(|s| s.as_str()).collect();
         assert!(vals.contains(&"com.acme.game"), "包名未替换: {vals:?}");
         assert!(vals.contains(&"我的游戏"), "应用名未替换: {vals:?}");

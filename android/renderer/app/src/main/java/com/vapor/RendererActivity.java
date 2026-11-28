@@ -36,7 +36,7 @@ public class RendererActivity extends Activity implements SurfaceHolder.Callback
     private native void nativeShutdown();
     private native void nativeTouch(int action, float x, float y,
                                     int pointerId, int pointerCount, float x2, float y2);
-    private native void nativeKey(int keycode, int action);
+    private native boolean nativeKey(int keycode, int action);
     private native void nativeWheel(float dx, float dy);
     private native void nativePermissionResult(int code, boolean granted);
 
@@ -157,15 +157,21 @@ public class RendererActivity extends Activity implements SurfaceHolder.Callback
 
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
-        // 先转发给 Python（返回键用于 Navigator.pop 等），再交回系统默认处理：
-        // 页面栈已出栈时按返回键仍然能正常退出。
-        nativeKey(keyCode, 0);
+        // 转发给 Python；返回 true 表示 Python 运行时接管（页面栈/back 处理器决定后续，
+        // 未处理时由 Python 调 Activity.finish()）。没有 Python 时交回系统默认处理。
+        boolean handled = nativeKey(keyCode, 0);
+        if (handled) {
+            return true;
+        }
         return super.onKeyDown(keyCode, event);
     }
 
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent event) {
-        nativeKey(keyCode, 1);
+        boolean handled = nativeKey(keyCode, 1);
+        if (handled) {
+            return true;
+        }
         return super.onKeyUp(keyCode, event);
     }
 

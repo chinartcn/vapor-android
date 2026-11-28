@@ -175,6 +175,9 @@ class App:
                     return True
             except Exception as exc:
                 _warn(f"back 处理器失败: {exc}")
+        # Android 上 Java 会吞掉 BACK 交给 Python；没有页面可弹 / 没有处理器时
+        # 由这里结束 Activity，避免返回键失效。
+        _finish_activity()
         return False
 
     # ---- 事件分发 ----
@@ -298,6 +301,21 @@ def on_tick(fn):
     if app is None:
         raise RuntimeError("on_tick 只能在 App 挂载后使用")
     return app.on_tick(fn)
+
+
+def _finish_activity():
+    """Android 宿主：结束当前 Activity（桌面/无原生环境静默忽略）。"""
+    try:
+        from rust import Vapor as rv
+
+        act = rv.activity()
+        if not act:
+            return
+        from rust import jni
+
+        jni.call(int(act), "finish", "()V", [])
+    except Exception:
+        pass
 
 
 App.current = None

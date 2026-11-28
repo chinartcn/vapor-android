@@ -118,6 +118,13 @@ class Surface:
         self.buffer = buf
 
     def canvas(self) -> Canvas:
+        # 每帧重新加锁：Rust 在 lock→unlock 期间拒绝 resize，避免帧缓冲被
+        # 重新分配后 Canvas 仍持有旧指针。
+        if self._native and self._rv is not None:
+            try:
+                self._rv.framebuffer()
+            except Exception:
+                pass
         return Canvas(self.buffer, self.width, self.height)
 
     def present(self):

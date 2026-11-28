@@ -69,6 +69,7 @@ struct PyStatus {
 #[repr(C, align(16))]
 struct PyConfigBuf([u8; 4096]);
 
+#[derive(Clone, Copy)]
 struct PyApi {
     initialize: PyInitializeExFn, // 降级用：Py_InitializeEx(0)
     finalize: PyFinalizeExFn,
@@ -92,7 +93,6 @@ static PY_READY: AtomicBool = AtomicBool::new(false);
 /// 若首次失败后再次 Py_InitializeFromConfig，会因全局状态残留触发
 /// "error reading frozen getpath.py" 等连锁错误。故失败后不再重试。
 static PY_ATTEMPTED: AtomicBool = AtomicBool::new(false);
-static GIL: Mutex<()> = Mutex::new(());
 
 unsafe fn resolve<T: Copy>(handle: *mut c_void, name: &str) -> Result<T, ()> {
     let c = CString::new(name).map_err(|_| ())?;
@@ -235,13 +235,18 @@ pub fn py_init(app_dir: *const c_char) -> i32 {
         unsafe {
             config_init(cfg_ptr);
             let status = initialize_from_config(cfg_ptr as *const c_void);
+            // 必须在 PyConfig_Clear 之前复制错误信息：err_msg 可能指向
+            // PyConfig 内部动态分配的字段，Clear 之后即悬垂。
+            let failed = status_exception(status) != 0;
+            let detail = if !failed {
+                String::new()
+            } else if status.err_msg.is_null() {
+                format!("type={}", status._type)
+            } else {
+                CStr::from_ptr(status.err_msg).to_string_lossy().into_owned()
+            };
             config_clear(cfg_ptr);
-            if status_exception(status) != 0 {
-                let detail = if status.err_msg.is_null() {
-                    format!("type={}", status._type)
-                } else {
-                    CStr::from_ptr(status.err_msg).to_string_lossy().into_owned()
-                };
+            if failed {
                 crate::log::log_msg(
                     crate::log::LOG_ERROR,
                     &format!("CPython 初始化失败（已拦截，不退出进程）: {detail}"),
@@ -329,15 +334,21 @@ pub fn py_run_file(path: *const c_char) -> i32 {
 }
 
 /// eval 一段 Python 代码，打印异常但不让渲染器崩溃。
+///
+/// 注意：**不能**在持有 Rust `Mutex` 的情况下执行任意 Python 代码。
+/// 用户代码可能经 `rust.Vapor.py_eval` 重入本函数；这里只短暂持锁复制
+/// 函数指针（均为 Copy），随后立即释放，GIL 由 `PyGILState_Ensure`
+/// 自身负责序列化与可重入。
 pub fn py_eval_str(code: &str) -> i32 {
-    let _guard = GIL.lock().unwrap_or_else(|e| e.into_inner());
     if !PY_READY.load(Ordering::Acquire) {
         return VAPOR_ERR_STATE;
     }
-    let api = PY_API.lock().unwrap();
-    let a = match api.as_ref() {
-        Some(a) => a,
-        None => return VAPOR_OK, // 降级模式：无 libpython，视为成功
+    let a = {
+        let api = PY_API.lock().unwrap_or_else(|e| e.into_inner());
+        match api.as_ref() {
+            Some(a) => *a,
+            None => return VAPOR_OK, // 降级模式：无 libpython，视为成功
+        }
     };
     let c = match CString::new(code) {
         Ok(c) => c,

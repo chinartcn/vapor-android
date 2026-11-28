@@ -16,13 +16,36 @@ fn cstr(p: *const c_char) -> Option<&'static str> {
     unsafe { CStr::from_ptr(p) }.to_str().ok()
 }
 
-/// 将相对路径解析到某个根目录，阻止 `..` 越界。
+/// 将相对路径解析到某个根目录：拒绝绝对路径 / `..`，并在目标存在时用
+/// `canonicalize` 确认解析后的真实路径仍在根目录内（防止符号链接越界）。
 fn safe_join(root: &str, rel: &str) -> Option<PathBuf> {
-    if rel.starts_with('/') || rel.contains("..") {
+    if rel.is_empty() || rel.starts_with('/') || rel.contains('\0') {
         return None;
     }
     let mut p = PathBuf::from(root);
-    p.push(rel);
+    for comp in Path::new(rel).components() {
+        match comp {
+            std::path::Component::Normal(c) => p.push(c),
+            _ => return None, // ParentDir / RootDir / CurDir / Prefix 一律拒绝
+        }
+    }
+    let root_canon = Path::new(root).canonicalize().ok();
+    if let Some(rc) = &root_canon {
+        if let Ok(real) = p.canonicalize() {
+            if !real.starts_with(rc) {
+                return None;
+            }
+            return Some(real);
+        }
+        // 目标尚不存在：校验父目录解析后仍在根内（防止写入符号链接目录）。
+        if let Some(parent) = p.parent() {
+            if let Ok(real_parent) = parent.canonicalize() {
+                if !real_parent.starts_with(rc) {
+                    return None;
+                }
+            }
+        }
+    }
     Some(p)
 }
 

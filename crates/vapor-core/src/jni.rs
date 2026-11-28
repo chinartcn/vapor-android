@@ -69,6 +69,24 @@ fn get_handle(id: i64) -> Option<Handle> {
     handles().lock().unwrap().get(&id).copied()
 }
 
+/// 取句柄并校验类型，防止把 jmethodID 当归对象、把数组当普通对象使用。
+fn get_handle_kind(id: i64, expected: &[HandleKind]) -> Result<Handle, String> {
+    let h = get_handle(id).ok_or_else(|| format!("无效句柄 {}", id))?;
+    let ok = expected.iter().any(|want| {
+        matches!(
+            (want, &h.kind),
+            (HandleKind::Obj, HandleKind::Obj)
+                | (HandleKind::Method, HandleKind::Method)
+                | (HandleKind::Array(_), HandleKind::Array(_))
+        )
+    });
+    if ok {
+        Ok(h)
+    } else {
+        Err(format!("句柄 {} 类型不匹配", id))
+    }
+}
+
 // ---- jvalue 联合体（与 jni.h 的 union jvalue 布局一致） ----
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -98,9 +116,12 @@ type NewObjFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *con
 type NewGlobalRefFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void;
 type DeleteGlobalRefFn = unsafe extern "C" fn(*mut c_void, *mut c_void);
 type DeleteLocalRefFn = unsafe extern "C" fn(*mut c_void, *mut c_void);
-type NewStringUtfFn = unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_void;
-type GetStringUtfCharsFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut u8) -> *const c_char;
-type ReleaseStringUtfCharsFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_char);
+// UTF-16 版本：NewStringUTF/GetStringUTFChars 使用 Modified UTF-8（非 BMP 字符
+// 会被编码成 6 字节代理对），与标准 UTF-8 不兼容；统一改用 UTF-16 接口。
+type NewStringFn = unsafe extern "C" fn(*mut c_void, *const u16, i32) -> *mut c_void;
+type GetStringCharsFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut u8) -> *const u16;
+type ReleaseStringCharsFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *const u16);
+type GetStringLenFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
 type GetArrayLenFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
 type NewArrayFn = unsafe extern "C" fn(*mut c_void, i32) -> *mut c_void;
 type NewObjArrayFn = unsafe extern "C" fn(*mut c_void, i32, *mut c_void, *mut c_void) -> *mut c_void;
@@ -210,12 +231,9 @@ unsafe fn build_args(
                 "d" => JValue { d: val.and_then(Value::as_f64).unwrap_or(0.0) },
                 "l" => {
                     let text = val.and_then(Value::as_str).unwrap_or("");
-                    let cs = CString::new(text).map_err(|_| "字符串含 NUL".to_string())?;
-                    let tbl = env_table(env);
-                    let new_s: NewStringUtfFn = cast(tbl.NewStringUTF);
-                    let js = new_s(env, cs.as_ptr());
+                    let js = new_jstring(env, text);
                     if js.is_null() {
-                        return Err("NewStringUTF 失败".into());
+                        return Err("NewString 失败".into());
                     }
                     temps.push(js);
                     JValue { l: js }
@@ -243,6 +261,36 @@ fn cleanup_temps(env: *mut c_void, temps: &[ *mut c_void ]) {
             del(env, t);
         }
     }
+}
+
+/// 用 UTF-16 接口把 Rust 字符串转成 jstring（正确处理 emoji 等非 BMP 字符）。
+unsafe fn new_jstring(env: *mut c_void, text: &str) -> *mut c_void {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let f: NewStringFn = cast(env_table(env).NewString);
+    f(env, units.as_ptr(), units.len() as i32)
+}
+
+/// 用 UTF-16 接口读取 jstring。
+unsafe fn jstring_to_string(env: *mut c_void, obj: *mut c_void) -> String {
+    if obj.is_null() {
+        return String::new();
+    }
+    let tbl = env_table(env);
+    let len_f: GetStringLenFn = cast(tbl.GetStringLength);
+    let get: GetStringCharsFn = cast(tbl.GetStringChars);
+    let rel: ReleaseStringCharsFn = cast(tbl.ReleaseStringChars);
+    let len = len_f(env, obj);
+    if len <= 0 {
+        return String::new();
+    }
+    let chars = get(env, obj, std::ptr::null_mut());
+    if chars.is_null() {
+        return String::new();
+    }
+    let units = std::slice::from_raw_parts(chars, len as usize);
+    let text = String::from_utf16_lossy(units);
+    rel(env, obj, chars);
+    text
 }
 
 /// 从签名 "(I)Ljava/lang/String;" 解析返回类型字符。
@@ -278,25 +326,16 @@ unsafe fn wrap_result(env: *mut c_void, t: char, raw: i64, obj: *mut c_void) -> 
         'v' => json!({"t":"v"}),
         'z' | 'b' | 'c' | 's' | 'i' => json!({"t": t.to_string(), "v": raw as i32}),
         'j' => json!({"t":"j","v":raw}),
-        'f' => json!({"t":"f","v":(raw as i32 as f32)}),
+        'f' => json!({"t":"f","v":f32::from_bits(raw as u32)}),
         'd' => json!({"t":"d","v":f64::from_bits(raw as u64)}),
         'l' => {
-            // jstring：读取 UTF-8 字符串直接返回
+            // jstring：读取 UTF-16 字符串（与 JNI Modified UTF-8 解耦）
             if obj.is_null() {
                 json!({"t":"l","v":null})
             } else {
-                let tbl = env_table(env);
-                let get_chars: GetStringUtfCharsFn = cast(tbl.GetStringUTFChars);
-                let rel: ReleaseStringUtfCharsFn = cast(tbl.ReleaseStringUTFChars);
-                let chars = get_chars(env, obj, std::ptr::null_mut());
-                let text = if chars.is_null() {
-                    String::new()
-                } else {
-                    CStr::from_ptr(chars).to_string_lossy().into_owned()
-                };
-                if !chars.is_null() {
-                    rel(env, obj, chars);
-                }
+                let text = jstring_to_string(env, obj);
+                let del: DeleteLocalRefFn = cast(env_table(env).DeleteLocalRef);
+                del(env, obj);
                 json!({"t":"l","v":text})
             }
         }
@@ -304,8 +343,11 @@ unsafe fn wrap_result(env: *mut c_void, t: char, raw: i64, obj: *mut c_void) -> 
             if obj.is_null() {
                 json!({"t": t.to_string(), "handle": 0})
             } else {
-                let new_g: NewGlobalRefFn = cast(env_table(env).NewGlobalRef);
+                let tbl = env_table(env);
+                let new_g: NewGlobalRefFn = cast(tbl.NewGlobalRef);
                 let g = new_g(env, obj);
+                let del: DeleteLocalRefFn = cast(tbl.DeleteLocalRef);
+                del(env, obj); // 全局引用已持有，释放调用产生的局部引用
                 let h = new_handle(
                     if t == 'a' { HandleKind::Array('i') } else { HandleKind::Obj },
                     g,
@@ -411,7 +453,7 @@ unsafe fn dispatch(env: *mut c_void, op: &str, req: &Value) -> Result<Value, Str
         }
         "get_method" | "get_static_method" => {
             let id = req.get("target").and_then(Value::as_i64).ok_or("缺少 target(class 句柄)")?;
-            let h = get_handle(id).ok_or("无效 class 句柄")?;
+            let h = get_handle_kind(id, &[HandleKind::Obj])?;
             let name = s(req, "name").ok_or("缺少 name")?;
             let sig = s(req, "sig").ok_or("缺少 sig")?;
             let class = h.ptr as *mut c_void;
@@ -425,10 +467,10 @@ unsafe fn dispatch(env: *mut c_void, op: &str, req: &Value) -> Result<Value, Str
             let rt = ret_type(req, &sig);
 
             // 定位 class：优先用 method 句柄携带的 class，否则按 class 名 find
-            let class = if let Some(mh) = req.get("method").and_then(Value::as_i64) {
-                let h = get_handle(mh).ok_or("无效 method 句柄")?;
+            let (class, class_local) = if let Some(mh) = req.get("method").and_then(Value::as_i64) {
+                let h = get_handle_kind(mh, &[HandleKind::Method])?;
                 if h.class != 0 {
-                    h.class as *mut c_void
+                    (h.class as *mut c_void, false)
                 } else {
                     resolve_class(env, req)?
                 }
@@ -438,7 +480,7 @@ unsafe fn dispatch(env: *mut c_void, op: &str, req: &Value) -> Result<Value, Str
 
             // 方法：优先用 method 句柄，否则 get_method_id
             let method = if let Some(mh) = req.get("method").and_then(Value::as_i64) {
-                let h = get_handle(mh).ok_or("无效 method 句柄")?;
+                let h = get_handle_kind(mh, &[HandleKind::Method])?;
                 h.ptr as *mut c_void
             } else {
                 let name = s(req, "name").ok_or("缺少 name")?;
@@ -453,7 +495,7 @@ unsafe fn dispatch(env: *mut c_void, op: &str, req: &Value) -> Result<Value, Str
                 class
             } else {
                 let id = req.get("target").and_then(Value::as_i64).ok_or("缺少 target(对象句柄)")?;
-                let h = get_handle(id).ok_or("无效 target 句柄")?;
+                let h = get_handle_kind(id, &[HandleKind::Obj])?;
                 h.ptr as *mut c_void
             };
 
@@ -474,7 +516,8 @@ unsafe fn dispatch(env: *mut c_void, op: &str, req: &Value) -> Result<Value, Str
                 raw = 0;
             } else if rt == 'f' {
                 let f: CallFloatFn = cast(if static_ { tbl.CallStaticFloatMethodA } else { tbl.CallFloatMethodA });
-                raw = f(env, receiver, method, ap) as i64;
+                // 与 double 一致用位模式传递，避免 as i64 截断小数部分。
+                raw = f(env, receiver, method, ap).to_bits() as i64;
             } else if rt == 'd' {
                 let f: CallDoubleFn = cast(if static_ { tbl.CallStaticDoubleMethodA } else { tbl.CallDoubleMethodA });
                 raw = f(env, receiver, method, ap).to_bits() as i64;
@@ -497,6 +540,10 @@ unsafe fn dispatch(env: *mut c_void, op: &str, req: &Value) -> Result<Value, Str
                 raw = f(env, receiver, method, ap);
             }
             cleanup_temps(env, &temps);
+            if class_local && !class.is_null() {
+                let del: DeleteLocalRefFn = cast(env_table(env).DeleteLocalRef);
+                del(env, class);
+            }
             if let Some(e) = check_exception(env) {
                 return Err(e);
             }
@@ -526,11 +573,9 @@ unsafe fn dispatch(env: *mut c_void, op: &str, req: &Value) -> Result<Value, Str
         }
         "new_string" => {
             let text = s(req, "value").ok_or("缺少 value")?;
-            let cs = CString::new(text).map_err(|_| "字符串含 NUL".to_string())?;
-            let f: NewStringUtfFn = cast(env_table(env).NewStringUTF);
-            let js = f(env, cs.as_ptr());
+            let js = new_jstring(env, &text);
             if js.is_null() {
-                return Err("NewStringUTF 失败".into());
+                return Err("NewString 失败".into());
             }
             let new_g: NewGlobalRefFn = cast(env_table(env).NewGlobalRef);
             let g = new_g(env, js);
@@ -541,24 +586,12 @@ unsafe fn dispatch(env: *mut c_void, op: &str, req: &Value) -> Result<Value, Str
         }
         "get_string" => {
             let id = req.get("target").and_then(Value::as_i64).ok_or("缺少 target")?;
-            let h = get_handle(id).ok_or("无效句柄")?;
-            let tbl = env_table(env);
-            let get_chars: GetStringUtfCharsFn = cast(tbl.GetStringUTFChars);
-            let rel: ReleaseStringUtfCharsFn = cast(tbl.ReleaseStringUTFChars);
-            let chars = get_chars(env, h.ptr as *mut c_void, std::ptr::null_mut());
-            let text = if chars.is_null() {
-                String::new()
-            } else {
-                CStr::from_ptr(chars).to_string_lossy().into_owned()
-            };
-            if !chars.is_null() {
-                rel(env, h.ptr as *mut c_void, chars);
-            }
-            Ok(json!({"v": text}))
+            let h = get_handle_kind(id, &[HandleKind::Obj])?;
+            Ok(json!({"v": jstring_to_string(env, h.ptr as *mut c_void)}))
         }
         "array_length" => {
             let id = req.get("target").and_then(Value::as_i64).ok_or("缺少 target")?;
-            let h = get_handle(id).ok_or("无效句柄")?;
+            let h = get_handle_kind(id, &[HandleKind::Array('i')])?;
             let f: GetArrayLenFn = cast(env_table(env).GetArrayLength);
             Ok(json!({"v": f(env, h.ptr as *mut c_void)}))
         }
@@ -691,8 +724,14 @@ unsafe fn dispatch(env: *mut c_void, op: &str, req: &Value) -> Result<Value, Str
             Ok(json!({"ok": true}))
         }
         "is_same" => {
-            let a = get_handle(req.get("a").and_then(Value::as_i64).ok_or("缺少 a")?).ok_or("无效 a")?;
-            let bb = get_handle(req.get("b").and_then(Value::as_i64).ok_or("缺少 b")?).ok_or("无效 b")?;
+            let a = get_handle_kind(
+                req.get("a").and_then(Value::as_i64).ok_or("缺少 a")?,
+                &[HandleKind::Obj, HandleKind::Array('i')],
+            )?;
+            let bb = get_handle_kind(
+                req.get("b").and_then(Value::as_i64).ok_or("缺少 b")?,
+                &[HandleKind::Obj, HandleKind::Array('i')],
+            )?;
             let f: IsSameObjFn = cast(env_table(env).IsSameObject);
             Ok(json!({"v": f(env, a.ptr as *mut c_void, bb.ptr as *mut c_void) != 0}))
         }
@@ -700,23 +739,24 @@ unsafe fn dispatch(env: *mut c_void, op: &str, req: &Value) -> Result<Value, Str
     }
 }
 
-unsafe fn resolve_class(env: *mut c_void, req: &Value) -> Result<*mut c_void, String> {
+/// 解析 class 指针，返回 (指针, 是否为需要 DeleteLocalRef 的局部引用)。
+unsafe fn resolve_class(env: *mut c_void, req: &Value) -> Result<(*mut c_void, bool), String> {
     if let Some(ch) = req.get("class_handle").and_then(Value::as_i64) {
-        let h = get_handle(ch).ok_or("无效 class_handle")?;
-        return Ok(h.ptr as *mut c_void);
+        let h = get_handle_kind(ch, &[HandleKind::Obj])?;
+        return Ok((h.ptr as *mut c_void, false));
     }
     if let Some(name) = s(req, "class") {
-        return find_class(env, &name);
+        return Ok((find_class(env, &name)?, true));
     }
     // 实例调用：从 target 对象的实际 class 取（GetObjectClass）
     if let Some(t) = req.get("target").and_then(Value::as_i64) {
-        let h = get_handle(t).ok_or("无效 target 句柄")?;
+        let h = get_handle_kind(t, &[HandleKind::Obj])?;
         let f: GetObjectClassFn = cast(env_table(env).GetObjectClass);
         let cls = f(env, h.ptr as *mut c_void);
         if cls.is_null() {
             return Err("GetObjectClass 失败".into());
         }
-        return Ok(cls);
+        return Ok((cls, true));
     }
     Err("缺少 class / class_handle / target".into())
 }
@@ -727,19 +767,19 @@ unsafe fn field_op(env: *mut c_void, op: &str, req: &Value) -> Result<Value, Str
     let name = s(req, "name").ok_or("缺少 name")?;
     let sig = s(req, "sig").ok_or("缺少 sig")?;
 
-    let obj = if static_ {
+    let (obj, obj_local) = if static_ {
         resolve_class(env, req)?
     } else {
         let id = req.get("target").and_then(Value::as_i64).ok_or("缺少 target")?;
-        let h = get_handle(id).ok_or("无效句柄")?;
-        h.ptr as *mut c_void
+        let h = get_handle_kind(id, &[HandleKind::Obj])?;
+        (h.ptr as *mut c_void, false)
     };
     // 用对象实际类取 fieldID（静态则用 class）
-    let cls = if static_ {
-        obj
+    let (cls, cls_local) = if static_ {
+        (obj, false)
     } else {
         let f: GetObjectClassFn = cast(env_table(env).GetObjectClass);
-        f(env, obj)
+        (f(env, obj), true)
     };
     let fid = {
         let n = CString::new(name.as_str()).unwrap();
@@ -748,6 +788,10 @@ unsafe fn field_op(env: *mut c_void, op: &str, req: &Value) -> Result<Value, Str
         let gf: GetMethodFn = cast(if static_ { tbl.GetStaticFieldID } else { tbl.GetFieldID });
         let id = gf(env, cls, n.as_ptr(), sg.as_ptr());
         if id.is_null() {
+            if cls_local && !cls.is_null() {
+                let del: DeleteLocalRefFn = cast(tbl.DeleteLocalRef);
+                del(env, cls);
+            }
             return Err(format!("找不到字段 {}", name));
         }
         id
@@ -755,7 +799,7 @@ unsafe fn field_op(env: *mut c_void, op: &str, req: &Value) -> Result<Value, Str
     let t = sig.chars().next().map(normalize_type).unwrap_or('v');
     let tbl = env_table(env);
 
-    if set {
+    let result = if set {
         let val = req.get("value").ok_or("缺少 value")?;
         macro_rules! setf {
             ($fn_slot:expr, $ty:ty, $conv:expr) => {{
@@ -769,7 +813,7 @@ unsafe fn field_op(env: *mut c_void, op: &str, req: &Value) -> Result<Value, Str
             'z' => setf!(if static_ { tbl.SetStaticBooleanField } else { tbl.SetBooleanField }, u8, |v: &Value| v.as_bool().unwrap_or(false) as u8),
             'f' => setf!(if static_ { tbl.SetStaticFloatField } else { tbl.SetFloatField }, f32, |v: &Value| v.as_f64().unwrap_or(0.0) as f32),
             'd' => setf!(if static_ { tbl.SetStaticDoubleField } else { tbl.SetDoubleField }, f64, |v: &Value| v.as_f64().unwrap_or(0.0)),
-            _ => return Err(format!("set_field 暂不支持类型 {}", t)),
+            _ => Err(format!("set_field 暂不支持类型 {}", t))?,
         }
         check_exception(env).map_or(Ok(json!({"ok": true})), Err)
     } else {
@@ -787,7 +831,18 @@ unsafe fn field_op(env: *mut c_void, op: &str, req: &Value) -> Result<Value, Str
             'd' => Ok(json!({"v": getf!(if static_ { tbl.GetStaticDoubleField } else { tbl.GetDoubleField }, f64)})),
             _ => Err(format!("get_field 暂不支持类型 {}", t)),
         }
+    };
+    // 释放临时局部引用
+    if cls_local || obj_local {
+        let del: DeleteLocalRefFn = cast(tbl.DeleteLocalRef);
+        if cls_local && !cls.is_null() {
+            del(env, cls);
+        }
+        if obj_local && !obj.is_null() && obj != cls {
+            del(env, obj);
+        }
     }
+    result
 }
 
 // ---- 输出序列化 ----
@@ -825,27 +880,56 @@ pub fn register_object(env: *mut c_void, obj: *mut c_void) -> i64 {
 }
 
 pub fn release(handle: i64) -> i32 {
-    let h = match handles().lock().unwrap().remove(&handle) {
-        Some(h) => h,
+    // 先确认句柄存在并判断类型；对象/数组需要有效 env 才能释放。
+    let kind = match get_handle(handle) {
+        Some(h) => h.kind,
         None => return VAPOR_ERR,
     };
-    match h.kind {
+    match kind {
+        HandleKind::Method => {
+            handles().lock().unwrap().remove(&handle);
+            VAPOR_OK
+        }
         HandleKind::Obj | HandleKind::Array(_) => {
             let env = get_env();
             if env.is_null() {
+                // 拿不到 env 时不从表里移除，避免引用永久泄漏。
                 return VAPOR_ERR;
             }
+            let h = match handles().lock().unwrap().remove(&handle) {
+                Some(h) => h,
+                None => return VAPOR_ERR,
+            };
             unsafe {
                 let del: DeleteGlobalRefFn = cast(env_table(env).DeleteGlobalRef);
                 del(env, h.ptr as *mut c_void);
             }
+            VAPOR_OK
         }
-        HandleKind::Method => {}
     }
-    VAPOR_OK
 }
 
-/// 关闭时清理所有句柄（不删全局引用，JVM 即将销毁）。
+/// 关闭时清理所有句柄：对象/数组要逐个 DeleteGlobalRef，否则每次重建都会泄漏。
 pub fn shutdown_clear() {
-    handles().lock().unwrap().clear();
+    let env = get_env();
+    let entries: Vec<(i64, Handle)> = {
+        let mut map = handles().lock().unwrap();
+        map.drain().collect()
+    };
+    if env.is_null() {
+        return;
+    }
+    unsafe {
+        let del: DeleteGlobalRefFn = cast(env_table(env).DeleteGlobalRef);
+        for (_id, h) in entries {
+            match h.kind {
+                HandleKind::Obj | HandleKind::Array(_) => {
+                    if h.ptr != 0 {
+                        del(env, h.ptr as *mut c_void);
+                    }
+                }
+                HandleKind::Method => {}
+            }
+        }
+    }
 }

@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use vapor_abi::{VAPOR_ERR, VAPOR_ERR_ARG, VAPOR_ERR_NOT_FOUND, VAPOR_OK};
 
@@ -89,6 +89,27 @@ fn cstr(p: *const c_char) -> Option<&'static str> {
     }
 }
 
+/// 把相对路径限制在 `lib/` 目录内：拒绝绝对路径、`..` 与符号链接越界。
+fn safe_lib_join(base: &str, rel: &str) -> Option<PathBuf> {
+    if rel.is_empty() || rel.starts_with('/') || rel.contains('\0') {
+        return None;
+    }
+    let mut p = PathBuf::from(base);
+    for comp in Path::new(rel).components() {
+        match comp {
+            Component::Normal(c) => p.push(c),
+            _ => return None,
+        }
+    }
+    if let (Ok(root), Ok(real)) = (Path::new(base).canonicalize(), p.canonicalize()) {
+        if !real.starts_with(&root) {
+            return None;
+        }
+        return Some(real);
+    }
+    Some(p)
+}
+
 /// 解析并应用 abi.json（JSON 字符串），按顺序加载所有启用的扩展。
 pub fn load_manifest(json: *const c_char) -> i32 {
     let text = match cstr(json) {
@@ -115,7 +136,16 @@ pub fn load_manifest(json: *const c_char) -> i32 {
             "c" => format!("lib{}.so", e.name),
             _ => format!("{}.py", e.name),
         });
-        let full = PathBuf::from(lib_dir()).join(&rel);
+        let full = match safe_lib_join(&lib_dir(), &rel) {
+            Some(p) => p,
+            None => {
+                crate::log::log_msg(
+                    crate::log::LOG_WARN,
+                    &format!("扩展路径非法（必须在 lib/ 内）: {} -> {}", e.name, rel),
+                );
+                continue;
+            }
+        };
         let full_c = CString::new(full.to_string_lossy().as_bytes()).unwrap_or_default();
         let sym_c = CString::new(e.symbol.as_deref().unwrap_or("vapor_ext_init")).unwrap_or_default();
         let name_c = CString::new(e.name.as_str()).unwrap_or_default();

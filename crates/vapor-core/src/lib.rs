@@ -39,15 +39,22 @@ unsafe fn jstring_to_string(env: *mut c_void, s: *const c_char) -> String {
         return String::new();
     }
     let table = &*(*(env as *const *const jni_table::JNINativeTable));
-    type GetCharsFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut u8) -> *const c_char;
-    type ReleaseFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_char);
-    let get: GetCharsFn = std::mem::transmute_copy(&table.GetStringUTFChars);
-    let rel: ReleaseFn = std::mem::transmute_copy(&table.ReleaseStringUTFChars);
+    type GetLenFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
+    type GetCharsFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut u8) -> *const u16;
+    type ReleaseFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *const u16);
+    let get_len: GetLenFn = std::mem::transmute_copy(&table.GetStringLength);
+    let get: GetCharsFn = std::mem::transmute_copy(&table.GetStringChars);
+    let rel: ReleaseFn = std::mem::transmute_copy(&table.ReleaseStringChars);
+    let len = get_len(env, s as *mut c_void);
+    if len <= 0 {
+        return String::new();
+    }
     let chars = get(env, s as *mut c_void, std::ptr::null_mut());
     if chars.is_null() {
         return String::new();
     }
-    let out = CStr::from_ptr(chars).to_string_lossy().into_owned();
+    let units = std::slice::from_raw_parts(chars, len as usize);
+    let out = String::from_utf16_lossy(units);
     rel(env, s as *mut c_void, chars);
     out
 }
@@ -95,6 +102,7 @@ pub extern "C" fn vapor_init(config: *const VaporConfig) -> i32 {
     {
         let mut s = state::state().lock().unwrap();
         s.initialized = true;
+        s.fb_locked = false;
     }
 
     if cfg.enable_python != 0 {
@@ -112,9 +120,12 @@ pub extern "C" fn vapor_shutdown() -> i32 {
     python::shutdown();
     extension::shutdown_all();
     jni::shutdown_clear();
+    #[cfg(target_os = "android")]
+    ACTIVITY_HANDLE.store(0, std::sync::atomic::Ordering::Relaxed);
     let mut s = state::state().lock().unwrap();
     s.initialized = false;
     s.python_ready = false;
+    s.fb_locked = false;
     VAPOR_OK
 }
 
@@ -129,13 +140,8 @@ pub extern "C" fn vapor_fb_lock(out: *mut VaporFramebuffer) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn vapor_fb_unlock() -> i32 {
-    {
-        let mut s = match state::state().lock() {
-            Ok(g) => g,
-            Err(_) => return VAPOR_ERR_STATE,
-        };
-        if !s.initialized { return VAPOR_ERR_STATE; }
-        s.generation = s.generation.wrapping_add(1);
+    if state::unlock_framebuffer() != VAPOR_OK {
+        return VAPOR_ERR_STATE;
     }
     renderer::present();
     VAPOR_OK
@@ -537,6 +543,8 @@ pub extern "C" fn Java_com_vapor_RendererActivity_nativeWheel(
 }
 
 /// JNI 入口：按键（action: 0=down 1=up）。返回键 keycode=4，由 Python 决定是否处理。
+/// 返回值：1=有内嵌 Python 运行时接管（Java 应吞掉按键，由 Python 调 Activity.finish
+/// 退出）；0=无 Python，交回系统默认处理。
 #[cfg(target_os = "android")]
 #[no_mangle]
 #[allow(non_snake_case)]
@@ -545,7 +553,7 @@ pub extern "C" fn Java_com_vapor_RendererActivity_nativeKey(
     _thiz: *mut c_void,
     keycode: i32,
     action: i32,
-) {
+) -> u8 {
     push_event(VaporEvent {
         event_type: EVT_KEY,
         keycode,
@@ -553,6 +561,7 @@ pub extern "C" fn Java_com_vapor_RendererActivity_nativeKey(
         timestamp_ms: now_ms(),
         ..Default::default()
     });
+    if python::is_real_python() { 1 } else { 0 }
 }
 
 // ANativeWindow_fromSurface 属于 libandroid.so，必须显式链接。
