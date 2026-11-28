@@ -391,13 +391,17 @@ fn refresh_computed(py: Python<'_>, id: Id) -> PyResult<()> {
         Err(e) => return Err(e),
     };
 
-    with(|a| {
+    // 保存调用方的追踪上下文：computed 内部求值会临时切到 computed 自己，
+    // 结束后必须恢复，否则外层 effect 无法订阅到这个 computed（更新不触发）。
+    let prev = with(|a| {
+        let prev = a.current_sub;
         a.clear_deps(id);
         a.current_sub = id;
+        prev
     });
     let out = fnc.bind(py).call0();
     with(|a| {
-        a.current_sub = NONE;
+        a.current_sub = prev;
         a.run_count = a.run_count.wrapping_add(1);
     });
     let value = out?;
@@ -434,14 +438,16 @@ pub fn run_effect(py: Python<'_>, id: Id) -> PyResult<()> {
     if paused {
         return Ok(());
     }
-    with(|a| {
+    let prev = with(|a| {
+        let prev = a.current_sub;
         a.clear_deps(id);
         a.nodes[id as usize].queued = false;
         a.current_sub = id;
+        prev
     });
     let out = call_fn(py, &fnc);
     with(|a| {
-        a.current_sub = NONE;
+        a.current_sub = prev;
         a.run_count = a.run_count.wrapping_add(1);
     });
     out.map(|_| ())

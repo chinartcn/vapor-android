@@ -87,7 +87,10 @@ def call(req) -> dict:
     """执行一条 JNI 请求（dict 或 JSON 字符串），返回解析后的响应 dict。"""
     mod = _require()
     payload = req if isinstance(req, str) else json.dumps(req, ensure_ascii=False)
-    raw = mod.call(payload)
+    try:
+        raw = mod.call(payload)
+    except RuntimeError as exc:  # 原生库未加载 / JNI 调用失败
+        raise SdkUnavailable(str(exc)) from exc
     if not raw:
         return {"ok": False, "error": "空响应"}
     try:

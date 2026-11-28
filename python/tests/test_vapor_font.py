@@ -84,8 +84,11 @@ def test_install_and_uninstall():
         surface = V.Surface(240, 80, use_native=False)
         canvas = surface.canvas()
         canvas.fill_rect(0, 0, 240, 80, V.rgb(0, 0, 0))
-        canvas.text("中文", 10, 10, V.rgb(255, 255, 255), 28)
-        assert _painted(canvas) > 10
+        # CI 上的系统字体可能只有拉丁（如 DejaVu），按覆盖率挑一段能渲染的文本
+        active = V.active_font()
+        draw_text = "中文" if active.coverage("中文") > 0 else "Ab"
+        canvas.text(draw_text, 10, 10, V.rgb(255, 255, 255), 28)
+        assert _painted(canvas) > 10, draw_text
     finally:
         font.uninstall()
     assert V.active_font() is None

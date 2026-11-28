@@ -31,6 +31,8 @@ command -v cargo-ndk >/dev/null 2>&1 || {
 export PYO3_CROSS=1
 export PYO3_CROSS_PYTHON_VERSION=3.15
 export PYO3_NO_PYTHON=1
+# 关键：扩展模块不链接 libpython（否则会找 -lpython3.15 而失败）
+export PYO3_BUILD_EXTENSION_MODULE=1
 export CARGO_TARGET_DIR="$ROOT/build/target-pyext"
 
 echo "===== PyO3 扩展交叉编译（arm64-v8a + armeabi-v7a, API $API） ====="
@@ -38,7 +40,8 @@ rm -rf "$RAW"
 for crate in vapor-reactive vapor-ui vapor-sdk; do
   echo "--- $crate ---"
   cargo ndk --platform "$API" -t arm64-v8a -t armeabi-v7a -o "$RAW" \
-      build --release --manifest-path "rust/$crate/Cargo.toml"
+      build --release --features pyo3/extension-module \
+      --manifest-path "rust/$crate/Cargo.toml"
 done
 
 for abi in arm64-v8a armeabi-v7a; do
