@@ -81,7 +81,7 @@ copy_libpython arm32 "$BUILD/jniLibs/renderer/armeabi-v7a" \
 cp -r "$BUILD/jniLibs/renderer/." "$BUILD/jniLibs/packager/"
 
 echo "========== [5/7] 把 rust.Vapor 内置 Python 包 + 逻辑示例放进 assets =========="
-python3 -m pip wheel ./python -w "$OUT" --no-deps
+python3 -m pip wheel ./python -w "$OUT" --no-deps --no-build-isolation
 ASSETS="$ROOT/android/renderer/app/src/main/assets"
 ASSETS_PY="$ASSETS/python"
 mkdir -p "$ASSETS_PY"

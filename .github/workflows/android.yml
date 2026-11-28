@@ -26,7 +26,25 @@ jobs:
         with:
           ndk-version: r27c
           add-to-path: true
-      - run: cargo install cargo-ndk --locked
+      - name: Cache Cargo（registry + cargo-ndk）
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-ndk
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'crates/**/Cargo.toml', 'rust/**/Cargo.toml', 'rust/**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+      - name: Cache PyO3 构建产物
+        uses: actions/cache@v4
+        with:
+          path: build/target-pyext
+          key: pyext-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust/**/Cargo.lock', 'rust/**/Cargo.toml', 'rust/**/*.rs', 'rust/*.rs') }}
+          restore-keys: |
+            pyext-${{ runner.os }}-
+      - name: 安装 cargo-ndk（有缓存则跳过）
+        run: command -v cargo-ndk >/dev/null || cargo install cargo-ndk --locked
       - env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
         run: ./scripts/build_android_pyext.sh
@@ -58,6 +76,24 @@ jobs:
           echo "$SDK/platform-tools" >> "$GITHUB_PATH"
           yes | "$CMD/sdkmanager" --licenses >/dev/null 2>&1 || true
           "$CMD/sdkmanager" "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+      - name: Cache CPython / host-python / libffi
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/cpython
+            build/host-python
+            build/libffi
+            build/downloads
+          key: cpython-3.15.2-${{ runner.os }}-${{ hashFiles('scripts/build_cpython.sh', 'scripts/check_cpython_version.py') }}
+          restore-keys: |
+            cpython-3.15.2-${{ runner.os }}-
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('python/pyproject.toml') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi
@@ -66,7 +102,25 @@ jobs:
         with:
           ndk-version: r27c
           add-to-path: true
-      - run: cargo install cargo-ndk --locked
+      - name: Cache Cargo（registry + cargo-ndk）
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-ndk
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'crates/**/Cargo.toml', 'rust/**/Cargo.toml', 'rust/**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+      - name: Cache PyO3 构建产物
+        uses: actions/cache@v4
+        with:
+          path: build/target-pyext
+          key: pyext-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust/**/Cargo.lock', 'rust/**/Cargo.toml', 'rust/**/*.rs', 'rust/*.rs') }}
+          restore-keys: |
+            pyext-${{ runner.os }}-
+      - name: 安装 cargo-ndk（有缓存则跳过）
+        run: command -v cargo-ndk >/dev/null || cargo install cargo-ndk --locked
       - run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
       - uses: actions/download-artifact@v4
         with:
@@ -75,11 +129,13 @@ jobs:
       - name: 构建 CPython 3.15.2 双架构
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          VAPOR_OFFLINE: "1"
         run: ./scripts/build_cpython.sh all
       - name: 一键构建 APK
         env:
           ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          VAPOR_OFFLINE: "1"
         run: ./scripts/build_all.sh
       - uses: actions/upload-artifact@v4
         with:

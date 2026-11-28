@@ -33,6 +33,9 @@ PROVIDED="$ROOT/lib"
 OUT="$ROOT/build/cpython"
 SRC="$ROOT/build/cpython-src"
 DOWNLOADS="$ROOT/build/downloads"
+# 仓库自包含：离线构建输入放在 vendor/ 下；VAPOR_OFFLINE=1 时禁止联网。
+VENDOR="$ROOT/vendor"
+OFFLINE="${VAPOR_OFFLINE:-0}"
 NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
 
 mkdir -p "$OUT" "$SRC" "$DOWNLOADS"
@@ -47,18 +50,31 @@ LIBFFI_TGZ="$DOWNLOADS/libffi-$LIBFFI_VERSION.tar.gz"
 
 SHA_TGZ="f74e1db0eabd651cd01e4e2a00201bd41866abe74869ab716f9bf33cbbaa0943"
 SHA_ARM64="cfd4f0fdaff465ba62ebf3c3df2c8c410d0802fef3f98897082460df704cfef6"
+SHA_LIBFFI_346="b0dea9df23c863a7a50e825440f3ebffabd65df1497108e5d437747843895a4e"
 
 download() {
   local url="$1" dest="$2" expect="$3"
+  local name; name="$(basename "$dest")"
   if [ -f "$dest" ]; then
+    if [ -z "$expect" ]; then echo "[cache] $name"; return 0; fi
     local got; got="$(sha256sum "$dest" | awk '{print $1}')"
-    if [ "$got" = "$expect" ]; then echo "[cache] $(basename "$dest")"; return 0; fi
-    echo "[warn] $(basename "$dest") 校验不符，重新下载" >&2
+    if [ "$got" = "$expect" ]; then echo "[cache] $name"; return 0; fi
+    echo "[warn] $name 校验不符，重新获取" >&2
+    rm -f "$dest"
   fi
-  echo "[get] $url"
-  curl -fL --retry 3 -o "$dest" "$url"
+  # 优先使用 vendor/ 中的离线源（CI 必需，保证仓库自包含）。
+  if [ -f "$VENDOR/$name" ]; then
+    echo "[vendor] $name <- $VENDOR/$name"
+    cp -f "$VENDOR/$name" "$dest"
+  elif [ "$OFFLINE" = "1" ]; then
+    echo "[FATAL] 离线模式缺少 $VENDOR/$name；请把构建输入放入 vendor/" >&2
+    exit 1
+  else
+    echo "[get] $url"
+    curl -fL --retry 3 -o "$dest" "$url"
+  fi
   local got; got="$(sha256sum "$dest" | awk '{print $1}')"
-  if [ "$got" != "$expect" ]; then
+  if [ -n "$expect" ] && [ "$got" != "$expect" ]; then
     echo "[FATAL] SHA256 不匹配: $dest (期望 $expect, 实际 $got)" >&2
     exit 1
   fi
@@ -123,11 +139,14 @@ build_libffi_arm32() {
     echo "[FATAL] libffi 交叉编译需要 ANDROID_NDK_HOME" >&2
     exit 1
   fi
-  if [ ! -f "$LIBFFI_TGZ" ]; then
-    echo "[get] libffi $LIBFFI_VERSION (GitHub releases)"
-    curl -fL --retry 3 -o "$LIBFFI_TGZ" \
-      "https://github.com/libffi/libffi/releases/download/v$LIBFFI_VERSION/libffi-$LIBFFI_VERSION.tar.gz"
+  local sha=""
+  if [ "$LIBFFI_VERSION" = "3.4.6" ]; then
+    sha="$SHA_LIBFFI_346"
+  else
+    echo "[warn] libffi $LIBFFI_VERSION 无内置 SHA256，跳过校验" >&2
   fi
+  download "https://github.com/libffi/libffi/releases/download/v$LIBFFI_VERSION/libffi-$LIBFFI_VERSION.tar.gz" \
+    "$LIBFFI_TGZ" "$sha"
   local s="$SRC/libffi-$LIBFFI_VERSION"
   if [ ! -d "$s" ]; then tar -xzf "$LIBFFI_TGZ" -C "$SRC"; fi
   local TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
