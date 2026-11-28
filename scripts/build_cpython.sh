@@ -10,8 +10,9 @@
 #     与 PYTHON_VERSION 不符，脚本**失败退出**，绝不降级匹配低版本。
 #
 # 复用：lib/arm64-v8a 与 lib/armeabi-v7a 下若有 libpython3.15.so（从已构建 APK
-# 提取的正式产物），脚本直接复用它们；arm32 不再从源码交叉编译，标准库复用
-# arm64 的纯 Python 部分。设置 VAPOR_REBUILD_CPYTHON=1 可强制重建。
+# 提取的正式产物），脚本直接复用它们；但 arm32 的扩展模块（lib-dynload，math/
+# _ctypes/zlib 等）仓库里没有，缺失时会自动从源码交叉编译 arm32（并自动构建同版本
+# 宿主解释器）。设置 VAPOR_REBUILD_CPYTHON=1 可强制重建。
 #
 # 用法：
 #   export ANDROID_NDK_HOME=/path/to/android-ndk-r27c
@@ -75,6 +76,61 @@ force_build() {
   [ "${VAPOR_REBUILD_CPYTHON:-0}" = "1" ]
 }
 
+# 定位某个架构产物里的标准库目录（lib/python3.15，含 os.py）。
+stdlib_dir() {
+  local root="$1" p
+  for p in "$root/lib/python$PYTHON_MAJOR_MINOR" "$root/prefix/lib/python$PYTHON_MAJOR_MINOR"; do
+    if [ -f "$p/os.py" ]; then echo "$p"; return 0; fi
+  done
+  find "$root" -maxdepth 5 -type f -path "*/python$PYTHON_MAJOR_MINOR/os.py" 2>/dev/null \
+    | head -1 | xargs -r dirname
+}
+
+# 交叉编译 arm32 需要「同版本」宿主解释器。缺失时从同一份源码自动构建一次，
+# 避免 CI 里手工准备 build/host-python。
+ensure_host_python() {
+  if [ -n "${BUILD_PYTHON:-}" ]; then return 0; fi
+  local hp="$ROOT/build/host-python/install/bin/python$PYTHON_MAJOR_MINOR"
+  if [ -x "$hp" ]; then BUILD_PYTHON="$hp"; return 0; fi
+  echo "[info] 未找到同版本宿主 Python，开始从源码构建 $PYTHON_VERSION（arm32 交叉编译所需）" >&2
+  fetch_sources
+  local s="$SRC/host-Python-$PYTHON_VERSION"
+  if [ ! -x "$s/configure" ]; then
+    rm -rf "$s"; mkdir -p "$s"
+    tar -xzf "$PY_TGZ" -C "$s" --strip-components=1
+  fi
+  ( cd "$s" \
+      && ./configure --prefix="$ROOT/build/host-python/install" --without-ensurepip >/dev/null \
+      && { make -k -j"$(nproc)" >/dev/null || true; } \
+      && { make install >/dev/null || true; } )
+  if [ ! -x "$hp" ]; then
+    echo "[FATAL] 宿主 Python 构建失败（$hp 不存在）" >&2
+    exit 1
+  fi
+  BUILD_PYTHON="$hp"
+}
+
+# 把交叉编译产出的扩展模块（math/_ctypes/zlib/...）放进 lib-dynload。
+# 这些是 CPython 标准库里以 .so 形式提供的模块，缺了它们 `import math` 会直接报
+# ModuleNotFoundError（真机日志即为此现象）。
+install_built_extensions() {
+  local s="$1" d="$2" copied=0 so
+  mkdir -p "$d/lib/python$PYTHON_MAJOR_MINOR/lib-dynload"
+  while IFS= read -r so; do
+    [ -n "$so" ] || continue
+    cp -f "$so" "$d/lib/python$PYTHON_MAJOR_MINOR/lib-dynload/"
+    copied=$((copied + 1))
+  done < <(find "$s/build" -maxdepth 2 -type f -name '*.so' ! -name 'libpython*' 2>/dev/null)
+  # 平台相关配置模块（sysconfig 需要）
+  find "$s/build" -maxdepth 2 -type f -name '_sysconfigdata*.py' \
+    -exec cp -f {} "$d/lib/python$PYTHON_MAJOR_MINOR/" \; 2>/dev/null || true
+  if [ "$copied" -eq 0 ]; then
+    echo "[FATAL] 未生成任何扩展模块，lib-dynload 为空（math 等模块将不可用）" >&2
+    exit 1
+  fi
+  echo "[ok] lib-dynload <- $copied 个扩展模块"
+}
+
 # ---- 版本一致性校验：读取产物的 git-like 版本标记，不符则退出 ----
 assert_version() {
   local arch="$1" ver="$2"
@@ -117,8 +173,18 @@ build_arm64() {
 
 build_arm32() {
   local d="$OUT/arm32"; mkdir -p "$d"
+  # 已完整源码构建过（有 lib-dynload）则直接跳过，避免 build_all 重复耗时。
+  if [ -d "$d/lib/python$PYTHON_MAJOR_MINOR/lib-dynload" ] \
+     && [ -n "$(ls -A "$d/lib/python$PYTHON_MAJOR_MINOR/lib-dynload" 2>/dev/null)" ] \
+     && ! force_build; then
+    echo "===== arm32: 已存在完整构建，跳过 ====="
+    echo "$PYTHON_VERSION" > "$OUT/arm32.version"
+    return
+  fi
+
   local provided; provided="$(provided_lib armeabi-v7a)"
-  if [ -n "$provided" ] && ! force_build; then
+  local provided_dynload="$PROVIDED/armeabi-v7a/lib/python$PYTHON_MAJOR_MINOR/lib-dynload"
+  if [ -n "$provided" ] && ! force_build && [ -d "$provided_dynload" ]; then
     echo "===== arm32: 复用 $provided（跳过源码交叉编译） ====="
     cp -f "$provided" "$d/libpython$PYTHON_MAJOR_MINOR.so"
     mkdir -p "$d/lib/python$PYTHON_MAJOR_MINOR"
@@ -128,6 +194,8 @@ build_arm32() {
     else
       echo "[warn] 缺少 arm64 标准库，arm32 将没有 stdlib（先跑 arm64 或加 VAPOR_REBUILD_CPYTHON=1）"
     fi
+    cp -r "$provided_dynload" "$d/lib/python$PYTHON_MAJOR_MINOR/lib-dynload"
+    echo "[reuse] arm32 lib-dynload <- $provided_dynload"
     assert_version arm32 "$PYTHON_VERSION"
     echo "[ok] arm32 (reuse) -> $d"
     return
@@ -145,16 +213,8 @@ build_arm32() {
   fi
 
   # 交叉编译 CPython 需要一个与目标**同版本**的宿主解释器来生成 .pyc 与配置头。
-  # BUILD_PYTHON 可由调用方指定；默认探测 build/host-python/install/bin/python3.15。
-  local BUILD_PYTHON="${BUILD_PYTHON:-}"
-  if [ -z "$BUILD_PYTHON" ] && [ -x "$ROOT/build/host-python/install/bin/python3.15" ]; then
-    BUILD_PYTHON="$ROOT/build/host-python/install/bin/python3.15"
-  fi
-  if [ -z "$BUILD_PYTHON" ]; then
-    echo "[FATAL] arm32 交叉编译需要同版本($PYTHON_VERSION)宿主 Python。" >&2
-    echo "        请先构建 build/host-python 或设置 BUILD_PYTHON=<python3.15 路径>" >&2
-    exit 1
-  fi
+  # BUILD_PYTHON 可由调用方指定；缺失时从同一份源码自动构建。
+  ensure_host_python
   local bp_ver
   bp_ver="$("$BUILD_PYTHON" -c 'import sys;print("%d.%d.%d"%sys.version_info[:3])')"
   if [ "$bp_ver" != "$PYTHON_VERSION" ]; then
@@ -234,26 +294,41 @@ open(p, "w", encoding="utf-8").write(s)
 left = [d for d in drop if f"Modules/{d}$(EXT_SUFFIX)" in s]
 print("[patch] Makefile: 已移除 _remote_debugging / _zstd / _lzma；SHAREDMODS 残余:", left)
 PYEOF
-  make -j"$(nproc)"
+  # -k：个别可选扩展（ssl/sqlite 等）在 NDK 缺依赖时允许跳过，
+  # 核心解释器与 math/_ctypes 等必需模块仍会构建；下面会校验 lib-dynload。
+  make -k -j"$(nproc)" || echo "[warn] make 有部分模块失败（继续，稍后校验 lib-dynload）" >&2
   # 动态库（Rust 侧通过 dlsym 加载，必须有 .so）
   cp -f libpython$PYTHON_MAJOR_MINOR.so* "$d/" 2>/dev/null || true
   cp -f libpython$PYTHON_MAJOR_MINOR.a "$d/" 2>/dev/null || true
-  # 标准库（pip 需要）
+  # 标准库：纯 Python 部分 + 交叉编译产出的扩展模块（lib-dynload）
+  # 关键：只拷 Lib/ 是没有 math/_ctypes/zlib 的，真机 `import math` 会失败。
   mkdir -p "$d/lib/python$PYTHON_MAJOR_MINOR"
   cp -r Lib/. "$d/lib/python$PYTHON_MAJOR_MINOR/"
+  install_built_extensions "$PWD" "$d"
   assert_version arm32 "$PYTHON_VERSION"
   cd - >/dev/null
   echo "[ok] arm32 -> $d"
 }
 
 verify_both() {
-  local a b
+  local a b arch std dyn
   a="$(cat "$OUT/arm64.version" 2>/dev/null || echo MISSING)"
   b="$(cat "$OUT/arm32.version" 2>/dev/null || echo MISSING)"
   if [ "$a" != "$b" ] || [ "$a" != "$PYTHON_VERSION" ]; then
     echo "[FATAL] 双架构版本不一致: arm64=$a arm32=$b, 要求=$PYTHON_VERSION" >&2
     exit 1
   fi
+  # 标准库完整性：必须有 lib-dynload 下的扩展模块，否则 APK 里没有 math 等模块。
+  for arch in arm64 arm32; do
+    std="$(stdlib_dir "$OUT/$arch")"
+    dyn="$std/lib-dynload"
+    if [ -z "$std" ] || [ ! -d "$dyn" ] || [ -z "$(ls -A "$dyn" 2>/dev/null)" ]; then
+      echo "[FATAL] $arch 缺少标准库扩展模块（$dyn）" >&2
+      echo "        arm32 需从源码交叉编译以生成 math/_ctypes/zlib 等 .so" >&2
+      exit 1
+    fi
+    echo "[ok] $arch lib-dynload: $(ls "$dyn" | wc -l) 个模块"
+  done
   echo "[PASS] arm64=$a arm32=$b 版本一致 ✔"
 }
 

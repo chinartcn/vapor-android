@@ -24,6 +24,9 @@ def _load(name: str, fallback: str | None):
     except ImportError as exc:
         if STRICT or fallback is None:
             raise
+        # 打印回退原因：否则真机上扩展 dlopen 失败会被后续的纯 Python 报错掩盖。
+        import sys
+        print(f"[vapor] 原生扩展 {name} 加载失败，回退 {fallback}: {exc}", file=sys.stderr)
         mod = importlib.import_module(f".{fallback}", __package__)
         mod.FALLBACK = True
         mod.IMPORT_ERROR = exc
