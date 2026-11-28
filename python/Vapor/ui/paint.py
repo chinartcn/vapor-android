@@ -9,28 +9,66 @@ from .colors import color, _with_alpha
 from .text import text_width, line_height, wrap_text
 from .renderer import _warn
 
+try:  # 文档 A 尚未合入时的空账本：CULL 默认关闭，不影响绘制。
+    from .dirty import ledger
+except ImportError:  # pragma: no cover - A 合入后走真实账本
+    class _NullLedger:
+        is_full = True
+
+        def mark_rect(self, x, y, w, h):
+            pass
+
+        def mark_full(self):
+            pass
+
+        def rects(self):
+            return ()
+
+    ledger = _NullLedger()
+
 __all__ = ["_paint_node"]
+
+# B4：按脏区裁剪遍历。默认关闭，需与文档 A 的像素一致性验收后再开启。
+CULL = False
+
+
+def _any_intersect(box: Rect, rects) -> bool:
+    for r in rects:
+        if hasattr(r, "x"):
+            rx, ry, rw, rh = r.x, r.y, r.w, r.h
+        else:
+            rx, ry, rw, rh = r[0], r[1], r[2], r[3]
+        if not (box.x + box.w <= rx or box.x >= rx + rw
+                or box.y + box.h <= ry or box.y >= ry + rh):
+            return True
+    return False
 
 
 def _intersects(a: Rect, b: Rect) -> bool:
     return not (a.x + a.w <= b.x or a.x >= b.x + b.w or a.y + a.h <= b.y or a.y >= b.y + b.h)
 
 
-def _paint_node(canvas, node: Node):
+def _paint_node(canvas, node: Node, clip=None):
     if not node.visible:
         return
     props = node.props
     if props.get("display") == "none":
         return
 
+    if CULL and clip is None and not ledger.is_full:
+        clip = ledger.rects()
+
+    box = node.box
+    if clip is not None and box.w > 0 and box.h > 0 and not _any_intersect(box, clip):
+        return
+
     # 容器壳（插槽 fragment / 组件节点）自己没有绘制，但必须继续向下遍历，
     # 否则插槽里的内容永远不会上屏。它们的 box 可能是 0x0，不能按尺寸提前返回。
     if node.tag in (_FRAGMENT, _COMPONENT):
         for child in node.children:
-            _paint_node(canvas, child)
+            _paint_node(canvas, child, clip)
         return
 
-    box = node.box
     if box.w <= 0 or box.h <= 0:
         return
 
@@ -112,7 +150,7 @@ def _paint_node(canvas, node: Node):
     for child in node.children:
         if node.clip and not _intersects(child.box, box):
             continue
-        _paint_node(canvas, child)
+        _paint_node(canvas, child, clip)
 
 
 def _scroll_max(viewport: Node) -> float:

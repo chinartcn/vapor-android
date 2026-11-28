@@ -25,6 +25,8 @@ class Node:
         "tag", "props", "children", "parent", "box", "events", "text",
         "effects", "scroll_y", "clip", "component", "key", "extra", "visible",
         "pressed", "hover",
+        # 上一帧布局后的 box（Rect 或 None），供脏区 old/new 对比。
+        "prev_box",
     )
 
     def __init__(self, tag, props=None, text=""):
@@ -33,6 +35,7 @@ class Node:
         self.children = []
         self.parent = None
         self.box = Rect()
+        self.prev_box = None
         self.events = {}
         self.text = text
         self.effects = []

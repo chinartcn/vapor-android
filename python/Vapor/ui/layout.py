@@ -6,7 +6,35 @@ from .base import Rect, Node, _TEXT, _FRAGMENT, _COMPONENT, _flow
 from .colors import _num
 from .text import text_width, line_height, wrap_text
 
+try:  # 文档 A 尚未合入时的空账本：标记全部为 no-op。
+    from .dirty import ledger
+except ImportError:  # pragma: no cover - A 合入后走真实账本
+    class _NullLedger:
+        is_full = True
+
+        def mark_rect(self, x, y, w, h):
+            pass
+
+        def mark_full(self):
+            pass
+
+        def rects(self):
+            return ()
+
+    ledger = _NullLedger()
+
 __all__ = ["layout"]
+
+
+def _mark_box_change(node):
+    """对比 prev_box 与 box：旧区域（擦除）+ 新区域（重绘）都标脏。"""
+    old, new = node.prev_box, node.box
+    if old is not None and (old.x, old.y, old.w, old.h) != (new.x, new.y, new.w, new.h):
+        if old.w > 0 and old.h > 0:
+            ledger.mark_rect(old.x, old.y, old.w, old.h)
+        if new.w > 0 and new.h > 0:
+            ledger.mark_rect(new.x, new.y, new.w, new.h)
+    node.prev_box = Rect(new.x, new.y, new.w, new.h)
 
 
 def _padding(node):
@@ -88,6 +116,7 @@ def layout(node, x=0.0, y=0.0, w=None, h=None):
     if h is None:
         h = _measure(node)[1]
     node.box = Rect(x, y, w, h)
+    _mark_box_change(node)
     if node.tag in (_TEXT,):
         return
 
@@ -187,4 +216,5 @@ def _shift_children(node: Node, dx: float, dy: float):
     for child in node.children:
         child.box.x += dx
         child.box.y += dy
+        _mark_box_change(child)
         _shift_children(child, dx, dy)

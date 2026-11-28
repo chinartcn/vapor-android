@@ -8,6 +8,23 @@ from .. import _native, core
 from .. import template as tpl_mod
 from .base import Node, _TEXT, _FRAGMENT, _COMPONENT
 
+try:  # 文档 A 尚未合入时的空账本：与 ledger.is_full=True 行为一致。
+    from .dirty import ledger
+except ImportError:  # pragma: no cover - A 合入后走真实账本
+    class _NullLedger:
+        is_full = True
+
+        def mark_rect(self, x, y, w, h):
+            pass
+
+        def mark_full(self):
+            pass
+
+        def rects(self):
+            return ()
+
+    ledger = _NullLedger()
+
 _core = _native.core
 
 __all__ = ["Renderer", "Component", "define_component", "register", "COMPONENTS"]
@@ -90,8 +107,17 @@ class Renderer:
         if self._buckets:
             self._buckets.pop()
 
-    def _new_effect(self, fn, scheduler=None):
-        handle = _core.effect(fn, scheduler)
+    def _new_effect(self, fn, scheduler=None, node=None):
+        def wrapped():
+            # effect 在 flush_jobs 时执行，此时 node.box 仍是上一帧的位置：
+            # 标记的是“变化前占据的区域”，用于擦除；变化后的新区域由 layout 对比覆盖。
+            if node is not None:
+                b = node.box
+                if b.w > 0 and b.h > 0:
+                    ledger.mark_rect(b.x, b.y, b.w, b.h)
+            return fn()
+
+        handle = _core.effect(wrapped, scheduler)
         if self._buckets:
             self._buckets[-1].append(handle)
         return handle
@@ -145,7 +171,7 @@ class Renderer:
             else:  # pragma: no cover - Reactive 之外的容器
                 node.props[key] = value
 
-        self._new_effect(apply)
+        self._new_effect(apply, node=node)
 
     def bind_text(self, node, getter):
         def apply():
@@ -154,13 +180,13 @@ class Renderer:
             except Exception as exc:
                 _warn(f"文本插值失败: {exc}")
 
-        self._new_effect(apply)
+        self._new_effect(apply, node=node)
 
     def bind_show(self, node, getter):
         def apply():
             node.visible = bool(getter())
 
-        self._new_effect(apply)
+        self._new_effect(apply, node=node)
 
     def bind_if(self, frag, branches):
         current = {"nodes": []}
@@ -176,6 +202,7 @@ class Renderer:
                     _warn(f"v-if 求值失败: {exc}")
                     break
             for node in current["nodes"]:
+                _mark_subtree(node)
                 node.dispose()
                 node.remove()
             current["nodes"] = []
@@ -236,6 +263,7 @@ class Renderer:
                     except Exception:
                         pass
                 for node in nodes:
+                    _mark_subtree(node)
                     node.dispose()
                     node.remove()
 
@@ -256,7 +284,7 @@ class Renderer:
                 return
             node.props["value"] = value
 
-        self._new_effect(apply)
+        self._new_effect(apply, node=node)
         node.props["on_change"] = setter
 
     def on(self, node, event, handler_provider, modifiers=None):
@@ -282,6 +310,16 @@ class Renderer:
             finally:
                 self._pop_bucket()
         return frag
+
+
+def _mark_subtree(node):
+    """节点从树上移除前，把它与整棵子树的旧区域标脏（用于擦除）。"""
+    if node is None:
+        return
+    for n in node.walk():
+        b = n.box
+        if b.w > 0 and b.h > 0:
+            ledger.mark_rect(b.x, b.y, b.w, b.h)
 
 
 def _warn(msg):
