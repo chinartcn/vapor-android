@@ -32,7 +32,11 @@ vapor/
 ├── python/Vapor/                    # 响应式框架：core / template / ui / sdk / svg
 │   ├── core.py                      # ref / reactive / computed / watch / effectScope
 │   ├── template.py                  # v-if / v-for / v-model / 插槽 编译器
-│   ├── ui.py                        # 组件 / 布局 / 事件 / 页面栈 / Canvas
+│   ├── ui/                          # 组件 / 布局 / 事件 / 页面栈 / Canvas
+│   │   ├── __init__.py              # 统一再导出（保持 import Vapor.ui as V）
+│   │   ├── base.py colors.py text.py canvas.py renderer.py
+│   │   ├── layout.py paint.py input.py app.py
+│   │   └── navigation.py widgets.py
 │   ├── svg.py                       # SVG 解析与矢量渲染
 │   ├── sdk.py                       # Toast / Vibrator / Clipboard / Prefs ...
 │   └── _fallback.py / _fallback_ui.py  # 无原生扩展时的纯 Python 实现

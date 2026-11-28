@@ -10,7 +10,7 @@ authors = [{ name = "Vapor Project" }]
 requires-python = ">=3.10"
 
 [tool.setuptools]
-packages = ["rust", "Vapor"]
+packages = ["rust", "Vapor", "Vapor.ui"]
 
 [tool.setuptools.package-data]
 rust = ["*.pyi", "libvapor.so"]
