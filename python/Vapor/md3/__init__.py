@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-from . import actions
+from . import actions, feedback, navigation, selection
 
-__all__ = ["actions"]
+__all__ = ["actions", "selection", "navigation", "feedback"]
 
 
 def install(host=None):
     """把所有已落地的 provider 注册进宿主；host=None 时用全局 ui.register。"""
     from Vapor import component
 
-    mods = [actions]
-    # 其余三份由编排层在此追加：selection / navigation / feedback
+    mods = [actions, selection, navigation, feedback]
     names = []
     for m in mods:
         if host is not None:
