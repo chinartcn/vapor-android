@@ -12,6 +12,7 @@
 #   build/output/VaporRenderer.apk   纯渲染器（arm32+arm64 fat APK）
 #   build/output/VaporPackager.apk   纯打包器（arm32+arm64 fat APK）
 #   build/output/rust.Vapor.whl      内置 Python 包
+#   build/pyext/<abi>/Vapor/*.so     Vapor._core / _ui / _sdk 原生扩展
 # =============================================================================
 set -euo pipefail
 
@@ -70,9 +71,26 @@ python3 -m pip wheel ./python -w "$OUT" --no-deps
 mkdir -p android/renderer/app/src/main/assets/python
 cp -r python/rust android/renderer/app/src/main/assets/python/
 mkdir -p android/renderer/app/src/main/assets/app
-cp -r protocol/example/. android/renderer/app/src/main/assets/app/
+# 默认示例换成 Showcase（页面栈/预设组件/自定义组件/权限演示）
+cp -r protocol/showcase/. android/renderer/app/src/main/assets/app/
 
-echo "========== [6/6] 组装两个 APK（aapt2 + javac + d8 + aapt + apksigner） =========="
+echo "========== [6/7] PyO3 响应式框架扩展（Vapor._core / _ui / _sdk） =========="
+./scripts/build_android_pyext.sh
+# 纯 Python 包放进 assets/python/site-packages；原生扩展按 ABI 分目录（Java 侧按机型拷贝）
+mkdir -p android/renderer/app/src/main/assets/python/site-packages
+cp -r python/Vapor android/renderer/app/src/main/assets/python/site-packages/
+for abi in arm64-v8a armeabi-v7a; do
+  mkdir -p "android/renderer/app/src/main/assets/python/pyext/$abi"
+  cp -r "build/pyext/$abi/." "android/renderer/app/src/main/assets/python/pyext/$abi/"
+done
+# 同时装进本机 CPython 运行时树，便于本机/模拟器直接验证
+for arch in arm64 arm32; do
+  if [ -d "build/cpython/$arch" ]; then
+    python3 scripts/install_to_cpython.py --home "build/cpython/$arch" --abi "$arch" || true
+  fi
+done
+
+echo "========== [7/7] 组装两个 APK（aapt2 + javac + d8 + aapt + apksigner） =========="
 ./scripts/assemble_apk.sh renderer
 ./scripts/assemble_apk.sh packager
 

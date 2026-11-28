@@ -16,6 +16,28 @@
       "path": "hello_py.py",
       "arch": "all",
       "enabled": false
+    },
+    {
+      "name": "font_ext",
+      "kind": "python",
+      "path": "font_ext.py",
+      "arch": "all",
+      "enabled": false
+    },
+    {
+      "name": "hello_component",
+      "kind": "python",
+      "path": "hello_component.py",
+      "arch": "all",
+      "enabled": false
+    },
+    {
+      "name": "component_abi",
+      "kind": "c",
+      "path": "libcomponent_abi.so",
+      "symbol": "vapor_component_init",
+      "arch": "all",
+      "enabled": false
     }
   ]
 }

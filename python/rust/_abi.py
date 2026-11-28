@@ -125,6 +125,9 @@ class _Fallback:
     def vapor_fs_app_dir(self): return self._paths[0]
     def vapor_fs_private_dir(self): return self._paths[1]
     def vapor_fs_external_dir(self): return self._paths[2]
+    # v1.2：没有 Activity / 权限系统
+    def vapor_activity(self): return 0
+    def vapor_permission_poll(self, code): return -1
 
 
 def _candidate_paths() -> list[str]:
@@ -210,6 +213,14 @@ def _bind(lib: ctypes.CDLL) -> None:
     bind("vapor_jni_detach", c_int32, [])
     bind("vapor_jni_call", c_int32, [c_char_p, c_char_p, c_int32])
     bind("vapor_jni_release", c_int32, [c_int64])
+    # v1.2 追加（可选）：Activity 句柄 + 运行时权限结果。
+    # 老版本 libvapor 没有这些符号，用 hasattr 兼容而不是直接崩。
+    for _name, _restype, _argtypes in (
+        ("vapor_activity", c_int64, []),
+        ("vapor_permission_poll", c_int32, [c_int32]),
+    ):
+        if hasattr(lib, _name):
+            bind(_name, _restype, _argtypes)
 
 
 def lib():

@@ -1,0 +1,24 @@
+[package]
+name = "vapor-sdk"
+version = "2.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Vapor SDK bridge: dlopen the stable C ABI (vapor_abi.h) and expose JNI/FS to Python (PyO3)"
+publish = false
+
+[lib]
+name = "_sdk"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.30", features = ["extension-module", "abi3-py310"] }
+libloading = "0.8"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = 3

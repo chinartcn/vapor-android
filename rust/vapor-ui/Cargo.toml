@@ -1,0 +1,22 @@
+[package]
+name = "vapor-ui"
+version = "2.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Vapor UI geometry engine: SVG path parsing/flattening, 2D matrices, text metrics (PyO3)"
+publish = false
+
+[lib]
+name = "_ui"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.30", features = ["extension-module", "abi3-py310"] }
+# 只用它取字形轮廓（同时支持 glyf 与 CFF/CFF2），光栅化在 font.rs 里自实现
+ttf-parser = "0.25"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = 3

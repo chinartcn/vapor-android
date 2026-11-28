@@ -1,0 +1,23 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "vapor-reactive"
+version = "2.0.0"
+description = "Vapor 响应式内核：alien-signals 风格细粒度响应式 + 高速 2D 光栅化（PyO3）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT OR Apache-2.0" }
+authors = [{ name = "Vapor Project" }]
+classifiers = [
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: Implementation :: CPython",
+]
+keywords = ["vapor", "reactive", "signals", "raster", "android"]
+
+[tool.maturin]
+module-name = "Vapor._core"
+python-source = "../../python"
+features = ["pyo3/extension-module"]
+strip = true

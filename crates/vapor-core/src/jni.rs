@@ -808,6 +808,22 @@ fn write_err(out: *mut c_char, cap: i32, msg: &str) -> i32 {
     write_value(out, cap, &json!({"ok": false, "error": msg}))
 }
 
+/// 把一个 jobject 注册成长期句柄（内部 NewGlobalRef），供宿主/扩展跨调用持有。
+/// 返回句柄（0 表示失败）；用 vapor_jni_release(handle) 释放。
+pub fn register_object(env: *mut c_void, obj: *mut c_void) -> i64 {
+    if env.is_null() || obj.is_null() {
+        return 0;
+    }
+    unsafe {
+        let new_g: NewGlobalRefFn = cast(env_table(env).NewGlobalRef);
+        let g = new_g(env, obj);
+        if g.is_null() {
+            return 0;
+        }
+        new_handle(HandleKind::Obj, g)
+    }
+}
+
 pub fn release(handle: i64) -> i32 {
     let h = match handles().lock().unwrap().remove(&handle) {
         Some(h) => h,

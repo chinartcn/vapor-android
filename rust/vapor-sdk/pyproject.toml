@@ -1,0 +1,23 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "vapor-sdk"
+version = "2.0.0"
+description = "Vapor SDK 桥接：dlopen 稳定 C ABI（vapor_abi.h），把 JNI / 文件系统暴露给 Python"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT OR Apache-2.0" }
+authors = [{ name = "Vapor Project" }]
+dependencies = ["vapor-reactive==2.0.0"]
+classifiers = [
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[tool.maturin]
+module-name = "Vapor._sdk"
+python-source = "../../python"
+features = ["pyo3/extension-module"]
+strip = true

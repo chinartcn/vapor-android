@@ -2,6 +2,8 @@ package com.vapor;
 
 import android.app.Activity;
 import android.os.Bundle;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
@@ -32,6 +34,11 @@ public class RendererActivity extends Activity implements SurfaceHolder.Callback
     private native void nativeResize(int w, int h);
     private native void nativeRender();
     private native void nativeShutdown();
+    private native void nativeTouch(int action, float x, float y,
+                                    int pointerId, int pointerCount, float x2, float y2);
+    private native void nativeKey(int keycode, int action);
+    private native void nativeWheel(float dx, float dy);
+    private native void nativePermissionResult(int code, boolean granted);
 
     private RenderThread renderThread;
     private volatile boolean running = false;
@@ -44,13 +51,135 @@ public class RendererActivity extends Activity implements SurfaceHolder.Callback
         try {
             File files = getFilesDir();
             copyAssets("python", new File(files, "python"));
+            // 按当前 ABI 把 PyO3 扩展（Vapor._core/_ui/_sdk）复制到 site-packages，
+            // 因为同一个 APK 里两个架构的 .so 同名，只能按机型选一份。
+            copyAssets("python/pyext/" + abiTag(), new File(files, "python/site-packages"));
             copyAssets("app", new File(files, "app"));
         } catch (IOException e) {
             android.util.Log.e("vapor", "解压 assets 失败", e);
         }
         SurfaceView view = new SurfaceView(this);
         view.getHolder().addCallback(this);
+        view.setFocusable(true);
+        view.setFocusableInTouchMode(true);
+        view.setOnTouchListener((v, event) -> {
+            forwardTouch(event);
+            return true;
+        });
         setContentView(view);
+    }
+
+    /**
+     * 把 MotionEvent 归一化成 (down/up/move/cancel + 单指针坐标) 转发给 Rust。
+     * 多指：按 actionIndex 取当前手指的 id 与坐标，第二根手指坐标一并带上。
+     */
+    private void forwardTouch(MotionEvent event) {
+        int masked = event.getActionMasked();
+        int action;
+        switch (masked) {
+            case MotionEvent.ACTION_DOWN:
+                action = 0;
+                break;
+            case MotionEvent.ACTION_POINTER_DOWN:
+                action = 4;   // 第二根手指按下（多指手势开始）
+                break;
+            case MotionEvent.ACTION_UP:
+                action = 1;
+                break;
+            case MotionEvent.ACTION_POINTER_UP:
+                action = 5;   // 第二根手指抬起
+                break;
+            case MotionEvent.ACTION_MOVE:
+                action = 2;
+                break;
+            case MotionEvent.ACTION_CANCEL:
+                action = 3;
+                break;
+            default:
+                return;
+        }
+        int index = (masked == MotionEvent.ACTION_POINTER_DOWN
+                || masked == MotionEvent.ACTION_POINTER_UP)
+                ? event.getActionIndex() : 0;
+        int pointerId = event.getPointerId(index);
+        float x = event.getX(index);
+        float y = event.getY(index);
+        float x2 = event.getPointerCount() > 1 ? event.getX(1) : x;
+        float y2 = event.getPointerCount() > 1 ? event.getY(1) : y;
+        nativeTouch(action, x, y, pointerId, event.getPointerCount(), x2, y2);
+    }
+
+    /**
+     * 供 Python 调用：声明过的危险权限在这里按需弹窗申请。
+     * 必须切到 UI 线程（runOnUiThread），因为 requestPermissions 只能主线程调用。
+     */
+    public void requestPermissionFromNative(final String permission, final int code) {
+        runOnUiThread(() -> {
+            try {
+                requestPermissions(new String[]{permission}, code);
+            } catch (Throwable t) {
+                nativePermissionResult(code, false);
+            }
+        });
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        boolean granted = grantResults.length > 0;
+        for (int result : grantResults) {
+            if (result != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                granted = false;
+                break;
+            }
+        }
+        nativePermissionResult(requestCode, granted);
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+    }
+
+    /**
+     * 鼠标 / 触控板：滚轮走 nativeWheel，悬停移动当成普通 move（方便桌面调试）。
+     */
+    @Override
+    public boolean onGenericMotionEvent(MotionEvent event) {
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_SCROLL) {
+            float dy = event.getAxisValue(MotionEvent.AXIS_VSCROLL);
+            float dx = event.getAxisValue(MotionEvent.AXIS_HSCROLL);
+            nativeWheel(dx, dy);
+            return true;
+        }
+        if (action == MotionEvent.ACTION_HOVER_MOVE) {
+            nativeTouch(2, event.getX(), event.getY(), 0, 1, event.getX(), event.getY());
+            return true;
+        }
+        return super.onGenericMotionEvent(event);
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        // 先转发给 Python（返回键用于 Navigator.pop 等），再交回系统默认处理：
+        // 页面栈已出栈时按返回键仍然能正常退出。
+        nativeKey(keyCode, 0);
+        return super.onKeyDown(keyCode, event);
+    }
+
+    @Override
+    public boolean onKeyUp(int keyCode, KeyEvent event) {
+        nativeKey(keyCode, 1);
+        return super.onKeyUp(keyCode, event);
+    }
+
+    /** 当前设备的主 ABI（决定复制哪一份 PyO3 原生扩展）。 */
+    private String abiTag() {
+        String[] abis = android.os.Build.SUPPORTED_ABIS;
+        if (abis != null) {
+            for (String abi : abis) {
+                if (abi != null && abi.startsWith("arm64")) {
+                    return "arm64-v8a";
+                }
+            }
+        }
+        return "armeabi-v7a";
     }
 
     /** 递归复制 assets 子目录到目标路径。 */

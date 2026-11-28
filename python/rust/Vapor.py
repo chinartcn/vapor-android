@@ -19,6 +19,7 @@ import json
 import os
 import struct
 import sys
+import time
 from typing import Iterable
 
 from . import _abi
@@ -283,6 +284,216 @@ def event_count() -> int:
     return _abi.lib().vapor_event_count()
 
 
+# ---------------------------------------------------------------------------
+# 完整触控数据（给需要自定义手势/调试的开发者；Vapor.ui 内部也用它）
+# ---------------------------------------------------------------------------
+
+# 事件类型（与 include/vapor_abi.h 一致；EVT_WHEEL 为 v1.2 追加，不影响旧结构布局）
+EVT_WHEEL = 8
+
+# 指针动作
+ACTION_DOWN, ACTION_UP, ACTION_MOVE, ACTION_CANCEL = 0, 1, 2, 3
+
+
+class TouchEvent:
+    """一条归一化后的输入事件（触摸 / 按键 / 滚轮）。"""
+
+    __slots__ = (
+        "kind", "action", "x", "y", "x2", "y2",
+        "pointer_id", "pointer_count", "keycode", "timestamp_ms", "raw",
+    )
+
+    def __init__(self, kind, action=0, x=0.0, y=0.0, x2=0.0, y2=0.0,
+                 pointer_id=0, pointer_count=1, keycode=0, timestamp_ms=0, raw=None):
+        self.kind = kind              # "down" / "up" / "move" / "cancel" / "key" / "wheel"
+        self.action = action          # 原始 action 值
+        self.x = x
+        self.y = y
+        self.x2 = x2                  # 第二根手指（单指时等于 x / y）
+        self.y2 = y2
+        self.pointer_id = pointer_id
+        self.pointer_count = pointer_count
+        self.keycode = keycode
+        self.timestamp_ms = timestamp_ms
+        self.raw = raw
+
+    # ---- 便捷判断 ----
+
+    @property
+    def is_down(self):
+        return self.kind == "down"
+
+    @property
+    def is_up(self):
+        return self.kind == "up"
+
+    @property
+    def is_move(self):
+        return self.kind == "move"
+
+    @property
+    def is_cancel(self):
+        return self.kind == "cancel"
+
+    @property
+    def is_multi_touch(self):
+        return self.pointer_count > 1
+
+    def distance_to(self, other) -> float:
+        dx = other.x - self.x
+        dy = other.y - self.y
+        return (dx * dx + dy * dy) ** 0.5
+
+    def spread(self) -> float:
+        """两指之间的距离（单指为 0），用于捏合缩放。"""
+        if self.pointer_count < 2:
+            return 0.0
+        dx = self.x - self.x2
+        dy = self.y - self.y2
+        return (dx * dx + dy * dy) ** 0.5
+
+    @property
+    def center(self):
+        if self.pointer_count < 2:
+            return (self.x, self.y)
+        return ((self.x + self.x2) / 2, (self.y + self.y2) / 2)
+
+    def to_dict(self) -> dict:
+        return {k: getattr(self, k) for k in self.__slots__ if k != "raw"}
+
+    def __repr__(self):
+        extra = f" ptr={self.pointer_id}/{self.pointer_count}" if self.pointer_count > 1 else ""
+        return f"TouchEvent({self.kind} {self.x:.0f},{self.y:.0f}{extra})"
+
+
+def _normalize_event(raw) -> TouchEvent | None:
+    """把 ABI 的 VaporEvent 归一化成 TouchEvent。"""
+    etype = getattr(raw, "type", 0)
+    action = getattr(raw, "action", 0)
+    keycode = getattr(raw, "keycode", 0)
+    ts = getattr(raw, "timestamp_ms", 0)
+    if etype == EVT_KEY:
+        return TouchEvent("key", action=action, keycode=keycode, timestamp_ms=ts, raw=raw)
+    if etype == EVT_WHEEL:
+        return TouchEvent("wheel", action=action, x=getattr(raw, "x", 0),
+                          y=getattr(raw, "y", 0), timestamp_ms=ts, raw=raw)
+    if etype == EVT_BUTTON:
+        if action == ACTION_DOWN:
+            kind = "down"
+        elif action == ACTION_UP:
+            kind = "up"
+        elif action == ACTION_CANCEL:
+            kind = "cancel"
+        elif action == 4:          # 追加：第二根手指按下（ACTION_POINTER_DOWN）
+            kind = "pointerdown"
+        elif action == 5:          # 追加：第二根手指抬起（ACTION_POINTER_UP）
+            kind = "pointerup"
+        else:
+            return None
+        count = keycode or 1
+    elif etype == EVT_MOTION:
+        kind = "move"
+        count = keycode or 1
+    else:
+        return None
+    return TouchEvent(
+        kind,
+        action=action,
+        x=getattr(raw, "x", 0),
+        y=getattr(raw, "y", 0),
+        x2=getattr(raw, "x2", 0),
+        y2=getattr(raw, "y2", 0),
+        pointer_id=getattr(raw, "button", 0),
+        pointer_count=count,
+        keycode=keycode,
+        timestamp_ms=ts,
+        raw=raw,
+    )
+
+
+def poll_touch() -> TouchEvent | None:
+    """取一条归一化的输入事件（触摸/按键/滚轮）；没有则返回 None。
+
+    与 poll_event() 的区别：poll_event 返回 ABI 原始结构，poll_touch 返回带
+    kind / pointer_id / pointer_count / spread() / center 的友好对象。
+    两者共享同一个事件队列，**不要在同一帧里混用**（会互相抢事件）。
+    """
+    raw = poll_event()
+    if raw is None:
+        return None
+    return _normalize_event(raw)
+
+
+def drain_touches(limit: int = 256) -> list:
+    """一次取空事件队列（最多 limit 条），适合自己写手势识别器。"""
+    out = []
+    for _ in range(limit):
+        ev = poll_touch()
+        if ev is None:
+            break
+        out.append(ev)
+    return out
+
+
+def touch_stream(limit: int = 256):
+    """事件生成器：while True 里没有事件时返回 None。"""
+    while True:
+        ev = poll_touch()
+        if ev is None:
+            return
+        yield ev
+
+
+# ---------------------------------------------------------------------------
+# 运行时权限（声明在 AndroidManifest，真正用到时才申请）
+# ---------------------------------------------------------------------------
+
+_PERMISSION_CODE = [1000]
+
+
+def activity() -> int:
+    """当前 Activity 的 JNI 句柄（0 表示非 Android / 未就绪）。"""
+    fn = getattr(_abi.lib(), "vapor_activity", None)
+    return int(fn()) if fn else 0
+
+
+def poll_permission(code: int) -> int:
+    """权限申请结果：-1 等待中，0 拒绝，1 授予（取走后清空）。"""
+    fn = getattr(_abi.lib(), "vapor_permission_poll", None)
+    return int(fn(int(code))) if fn else -1
+
+
+def request_permission(permission: str, timeout: float = 30.0) -> bool:
+    """申请一个运行时权限（会弹系统对话框，阻塞等待用户操作）。
+
+    权限必须先在 AndroidManifest 里声明；正常权限（VIBRATE 等）安装即授予，
+    这里会立刻返回 True。非 Android 环境返回 False。
+    """
+    if _abi.USING_FALLBACK:
+        return False
+    act = activity()
+    if not act:
+        return False
+    from . import jni
+
+    _PERMISSION_CODE[0] += 1
+    code = _PERMISSION_CODE[0]
+    jni.call(
+        int(act),
+        "requestPermissionFromNative",
+        "(Ljava/lang/String;I)V",
+        [jni.string(permission), jni.i(code)],
+        ret="v",
+    )
+    deadline = time.monotonic() + max(0.1, float(timeout))
+    while time.monotonic() < deadline:
+        result = poll_permission(code)
+        if result >= 0:
+            return bool(result)
+        time.sleep(0.05)
+    return False
+
+
 def set_title(title: str) -> None:
     _abi.lib().vapor_set_title(title.encode())
 
@@ -301,7 +512,10 @@ __all__ = [
     "rgb", "abi_version", "cpython_version", "init", "shutdown", "size", "resize",
     "framebuffer", "present", "clear", "pixel", "rect", "hline", "vline", "line",
     "circle", "disc", "square_outline",
-    "text", "poll_event", "event_count", "set_title", "fs", "ext", "pip", "ui", "jni",
+    "text", "poll_event", "poll_touch", "drain_touches", "touch_stream",
+    "TouchEvent", "event_count", "set_title", "activity", "request_permission",
+    "poll_permission", "fs", "ext", "pip", "ui", "jni",
     "EVT_NONE", "EVT_MOTION", "EVT_BUTTON", "EVT_KEY", "EVT_RESIZE",
-    "EVT_RESUME", "EVT_PAUSE", "EVT_DESTROY",
+    "EVT_RESUME", "EVT_PAUSE", "EVT_DESTROY", "EVT_WHEEL",
+    "ACTION_DOWN", "ACTION_UP", "ACTION_MOVE", "ACTION_CANCEL",
 ]

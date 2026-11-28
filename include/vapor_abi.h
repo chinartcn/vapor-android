@@ -53,6 +53,8 @@ typedef enum VaporEventType {
     VAPOR_EVT_RESUME     = 5,
     VAPOR_EVT_PAUSE      = 6,
     VAPOR_EVT_DESTROY    = 7,
+    /* v1.2 追加：滚轮/触控板。事件结构不变，x=水平滚动量，y=垂直滚动量（像素） */
+    VAPOR_EVT_WHEEL      = 8,
 } VaporEventType;
 
 typedef enum VaporLogLevel {

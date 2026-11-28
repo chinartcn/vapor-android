@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "description": "Showcase 逻辑包的扩展清单：RatingStars 是自定义组件（组件 ABI）",
+  "extensions": [
+    {
+      "name": "rating_stars",
+      "kind": "python",
+      "path": "rating_stars.py",
+      "arch": "all",
+      "enabled": true
+    }
+  ]
+}

@@ -9,9 +9,14 @@
 #   * 版本一致性：两个架构都锁定 PYTHON_VERSION=3.15.2；若任一架构拿到的版本
 #     与 PYTHON_VERSION 不符，脚本**失败退出**，绝不降级匹配低版本。
 #
+# 复用：lib/arm64-v8a 与 lib/armeabi-v7a 下若有 libpython3.15.so（从已构建 APK
+# 提取的正式产物），脚本直接复用它们；arm32 不再从源码交叉编译，标准库复用
+# arm64 的纯 Python 部分。设置 VAPOR_REBUILD_CPYTHON=1 可强制重建。
+#
 # 用法：
 #   export ANDROID_NDK_HOME=/path/to/android-ndk-r27c
-#   ./scripts/build_cpython.sh            # 全量
+#   ./scripts/build_cpython.sh            # 全量（有现成库就复用）
+#   ./scripts/build_cpython.sh reuse      # 显式复用模式
 #   ./scripts/build_cpython.sh arm64      # 仅 arm64（快）
 #   ./scripts/build_cpython.sh arm32      # 仅 arm32（需 NDK，较慢）
 # =============================================================================
@@ -20,6 +25,10 @@ set -euo pipefail
 PYTHON_VERSION="3.15.2"
 PYTHON_MAJOR_MINOR="3.15"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# 仓库里可能带着从已构建 APK 提取的 libpython（lib/<abi>/libpython3.15.so）。
+# 这些是正常构建产物，**优先复用**，省掉 arm32 源码交叉编译（需要同版本宿主解释器）。
+# 想强制重建：VAPOR_REBUILD_CPYTHON=1 ./scripts/build_cpython.sh all
+PROVIDED="$ROOT/lib"
 OUT="$ROOT/build/cpython"
 SRC="$ROOT/build/cpython-src"
 DOWNLOADS="$ROOT/build/downloads"
@@ -55,6 +64,17 @@ fetch_sources() {
   download "https://www.python.org/ftp/python/$PYTHON_VERSION/python-$PYTHON_VERSION-aarch64-linux-android.tar.gz" "$ARM64_PKG" "$SHA_ARM64"
 }
 
+# ---- 复用仓库里现成的 libpython（从已构建 APK 提取） ----
+provided_lib() {
+  local abi="$1"
+  local p="$PROVIDED/$abi/libpython$PYTHON_MAJOR_MINOR.so"
+  if [ -f "$p" ]; then echo "$p"; fi
+}
+
+force_build() {
+  [ "${VAPOR_REBUILD_CPYTHON:-0}" = "1" ]
+}
+
 # ---- 版本一致性校验：读取产物的 git-like 版本标记，不符则退出 ----
 assert_version() {
   local arch="$1" ver="$2"
@@ -69,7 +89,18 @@ assert_version() {
 build_arm64() {
   echo "===== arm64: 官方 Android embeddable $PYTHON_VERSION ====="
   local d="$OUT/arm64"; mkdir -p "$d"
-  tar -xzf "$ARM64_PKG" -C "$d" --strip-components=1
+  # 标准库只在缺失时下载（纯 Python，架构无关；也供 arm32 复用）
+  if [ ! -f "$d/lib/python$PYTHON_MAJOR_MINOR/os.py" ]; then
+    fetch_sources
+    tar -xzf "$ARM64_PKG" -C "$d" --strip-components=1
+  fi
+  # 优先用仓库里现成的 libpython（正常构建产物，已从 APK 提取）
+  local provided; provided="$(provided_lib arm64-v8a)"
+  if [ -n "$provided" ] && ! force_build; then
+    mkdir -p "$d/lib"
+    cp -f "$provided" "$d/lib/libpython$PYTHON_MAJOR_MINOR.so"
+    echo "[reuse] arm64 libpython <- $provided"
+  fi
   # 官方包内含 bin/python3.15 与 lib/libpython3.15.so
   local ver
   ver="$PYTHON_VERSION"   # 包名即版本，SHA 已校验；双保险从 pyvenv.cfg / 版本文件读
@@ -85,7 +116,25 @@ build_arm64() {
 }
 
 build_arm32() {
+  local d="$OUT/arm32"; mkdir -p "$d"
+  local provided; provided="$(provided_lib armeabi-v7a)"
+  if [ -n "$provided" ] && ! force_build; then
+    echo "===== arm32: 复用 $provided（跳过源码交叉编译） ====="
+    cp -f "$provided" "$d/libpython$PYTHON_MAJOR_MINOR.so"
+    mkdir -p "$d/lib/python$PYTHON_MAJOR_MINOR"
+    if [ -d "$OUT/arm64/lib/python$PYTHON_MAJOR_MINOR" ]; then
+      cp -r "$OUT/arm64/lib/python$PYTHON_MAJOR_MINOR/." "$d/lib/python$PYTHON_MAJOR_MINOR/"
+      echo "[reuse] arm32 stdlib <- arm64（纯 Python，架构无关）"
+    else
+      echo "[warn] 缺少 arm64 标准库，arm32 将没有 stdlib（先跑 arm64 或加 VAPOR_REBUILD_CPYTHON=1）"
+    fi
+    assert_version arm32 "$PYTHON_VERSION"
+    echo "[ok] arm32 (reuse) -> $d"
+    return
+  fi
+
   echo "===== arm32: 从源码交叉编译 CPython $PYTHON_VERSION ====="
+  fetch_sources
   if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
     echo "[FATAL] arm32 需要 ANDROID_NDK_HOME 指向 NDK r27c" >&2
     exit 1
@@ -94,7 +143,6 @@ build_arm32() {
   if [ ! -d "$s" ]; then
     tar -xzf "$PY_TGZ" -C "$SRC"
   fi
-  local d="$OUT/arm32"; mkdir -p "$d"
 
   # 交叉编译 CPython 需要一个与目标**同版本**的宿主解释器来生成 .pyc 与配置头。
   # BUILD_PYTHON 可由调用方指定；默认探测 build/host-python/install/bin/python3.15。
@@ -210,10 +258,9 @@ verify_both() {
 }
 
 TARGET="${1:-all}"
-fetch_sources
 case "$TARGET" in
   arm64) build_arm64 ;;
-  arm32) build_arm32 ;;
-  all)   build_arm64; build_arm32; verify_both ;;
-  *) echo "用法: $0 [arm64|arm32|all]" >&2; exit 2 ;;
+  arm32) build_arm64; build_arm32 ;;   # arm32 复用 arm64 标准库，先跑 arm64
+  all|reuse) build_arm64; build_arm32; verify_both ;;
+  *) echo "用法: $0 [arm64|arm32|all|reuse]" >&2; exit 2 ;;
 esac

@@ -4,6 +4,9 @@ target/
 *.dll
 *.dylib
 
+# 例外：仓库里预构建的 libpython（从已构建 APK 提取，CI 打包时复用）
+!lib/**/libpython*.so
+
 # 构建产物
 build/
 *.apk
@@ -15,6 +18,10 @@ __pycache__/
 *.egg-info/
 python/build/
 python/dist/
+# maturin 产物
+dist/
+rust/*/dist/
+.venv/
 .pytest_cache/
 
 # 验证用的本机 JVM 宿主编译产物（源码保留，编译命令见 docs/JNI_BRIDGE.md）
@@ -34,3 +41,7 @@ EOF
 # APK 构建时由 build_all.sh / assemble 脚本生成的 assets（CPython stdlib、内置包、示例逻辑）
 android/renderer/app/src/main/assets/python/
 android/renderer/app/src/main/assets/app/
+
+#github token
+.github.env
+*.env

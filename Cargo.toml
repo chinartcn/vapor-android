@@ -6,6 +6,12 @@ members = [
     "crates/vapor-renderer",
     "crates/vapor-packager",
 ]
+# PyO3/maturin crate 是独立的包（需要 Python 工具链），不参与 cargo --workspace 构建
+exclude = [
+    "rust/vapor-reactive",
+    "rust/vapor-ui",
+    "rust/vapor-sdk",
+]
 
 [workspace.package]
 version = "1.0.0"

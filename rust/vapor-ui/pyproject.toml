@@ -1,0 +1,23 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "vapor-ui"
+version = "2.0.0"
+description = "Vapor UI 几何引擎：SVG path 解析/扁平化、2D 矩阵、文本度量（PyO3）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT OR Apache-2.0" }
+authors = [{ name = "Vapor Project" }]
+dependencies = ["vapor-reactive==2.0.0"]
+classifiers = [
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[tool.maturin]
+module-name = "Vapor._ui"
+python-source = "../../python"
+features = ["pyo3/extension-module"]
+strip = true

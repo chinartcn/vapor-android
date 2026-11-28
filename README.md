@@ -21,10 +21,21 @@ vapor/
 │       ├── src/axml.rs              # 二进制 AndroidManifest.xml 改写器
 │       ├── src/sign.rs              # 纯 Rust APK v1 签名
 │       └── src/jni_bridge.rs        # Java ↔ Rust 桥接
+├── rust/                            # 三个 maturin(PyO3) crate：响应式框架
+│   ├── vapor-reactive/              # → Vapor._core  信号图 + 2D 光栅化
+│   ├── vapor-ui/                    # → Vapor._ui    SVG path / 矩阵 / 文本度量
+│   └── vapor-sdk/                   # → Vapor._sdk   dlopen C ABI → JNI
 ├── python/rust/                     # 内置 Python 包：import rust.Vapor
 │   ├── Vapor.py                     # 基础渲染 API（共享内存绘图）
 │   ├── _abi.py                      # ctypes C ABI 绑定 + 回退模式
 │   ├── fs.py / extension.py / piputil.py / ui.py
+├── python/Vapor/                    # 响应式框架：core / template / ui / sdk / svg
+│   ├── core.py                      # ref / reactive / computed / watch / effectScope
+│   ├── template.py                  # v-if / v-for / v-model / 插槽 编译器
+│   ├── ui.py                        # 组件 / 布局 / 事件 / 页面栈 / Canvas
+│   ├── svg.py                       # SVG 解析与矢量渲染
+│   ├── sdk.py                       # Toast / Vibrator / Clipboard / Prefs ...
+│   └── _fallback.py / _fallback_ui.py  # 无原生扩展时的纯 Python 实现
 ├── protocol/example/                # 逻辑包协议示例
 │   ├── main.py                      # 启动入口（固定）
 │   ├── main.json                    # 配置文件（固定）
@@ -84,6 +95,11 @@ cargo install cargo-ndk
 ```
 
 > 本轮已在后台下载 commandline-tools 与 NDK r27c 到 artifact 目录；SDK platform/build-tools 留待下一轮安装后即可走完 APK 组装。
+>
+> **CPython 复用**：仓库 `lib/{arm64-v8a,armeabi-v7a}/libpython3.15.so` 是从已构建 APK
+> 提取的正式产物，`scripts/build_cpython.sh` 会优先复用它们——arm32 不再从源码交叉编译
+> （那需要同版本宿主解释器），标准库直接复用 arm64 的纯 Python 部分。需要强制重建时设置
+> `VAPOR_REBUILD_CPYTHON=1`。
 
 ## 5. 两个 app
 
@@ -123,3 +139,103 @@ int32_t vapor_ext_init(VaporApi* api) {
 - **VM 自动注入**：NativeActivity 入口从 `JNIEnv::GetJavaVM` 取出 `JavaVM*` 注入，扩展开箱即用。
 
 示例：`protocol/example/lib/hello_jni.c`。完整文档与 18 项本机 JVM 验证见 [docs/JNI_BRIDGE.md](docs/JNI_BRIDGE.md)（`python/tests/test_jni.py`）。
+
+---
+
+## 8. 响应式 UI 框架（无 vdom）
+
+在渲染器之上还有一层 **Vue 3 Vapor 风格**的响应式 UI 框架：没有虚拟 DOM、
+没有 diff、没有组件级 re-render。写一个值，只有依赖它的那个 effect 重跑，
+只改它负责的那个属性，绘制层再把当前值画成像素。
+
+```python
+import Vapor.ui as V
+
+class Counter(V.Component):
+    template = '''
+      <View bg="#0B0E13" padding="24" gap="16" w="100%" h="100%">
+        <Text :size="64" :color="accent" align="center">{{ count }}</Text>
+        <Button text="+1" :on_click="inc" />
+      </View>
+    '''
+    def setup(self, props, ctx):
+        count = V.ref(0)
+        def inc(e=None): count.value += 1
+        return {
+            "count": count,
+            "accent": V.computed(lambda: "#7BD88F" if count.value > 0 else "#E6EAF0"),
+            "inc": inc,
+        }
+
+V.create_app(Counter, width=360, height=640).mount()
+```
+
+| 层 | 内容 |
+|---|---|
+| `Vapor.core` | `ref` / `reactive` / `computed` / `watch` / `effect_scope` / `provide` / `inject`（Vue 3 API 对齐） |
+| `Vapor.template` | `v-if` / `v-else-if` / `v-else`、`v-for`（keyed）、`v-show`、`v-model`、`v-text`、`:prop`、`@event`、插槽、`{{ }}` 插值 |
+| `Vapor.ui` | 组件、flex 布局、Canvas 绘制、触控手势（点击/拖动/长按/惯性滚动/双指）、事件冒泡、`Page` / `PageStack` / `Navigator`、`Scroll` |
+| `Vapor.svg` | SVG 当组件渲染（path/rect/circle/ellipse/line/polygon + transform，矢量光栅化） |
+| `Vapor.sdk` | 经稳定 C ABI 调 JNI：Toast / 振动 / 剪贴板 / Intent / SharedPreferences / 设备信息 |
+| `Vapor.font` | 字体扩展：TTF/OTF/TTC 真实字形（含中文）、按字符回退、测量与绘制同源 |
+| `Vapor.component` | 组件 ABI：组件提供者（manifest/register）+ C 外壳 + 模板生成，可热插拔分发 |
+| `Vapor.presets` | 内建现代化圆角组件：Card / Fab / Chip / SegmentedControl / Dialog / ProgressRing …（底层 Canvas 直绘） |
+
+三个原生模块由 **maturin** 打包（PyO3 + abi3-py310）：
+
+```bash
+maturin develop --manifest-path rust/vapor-reactive/Cargo.toml   # Vapor._core
+maturin develop --manifest-path rust/vapor-ui/Cargo.toml         # Vapor._ui
+maturin develop --manifest-path rust/vapor-sdk/Cargo.toml        # Vapor._sdk
+python -c "import Vapor; print(Vapor.status())"                  # 应为 rust
+```
+
+没有原生扩展时会自动回退到纯 Python 实现（`Vapor.status()` 显示
+`python-fallback`），所以开发机上不编译 Rust 也能跑：
+
+```bash
+PYTHONPATH=python python3 python/tests/test_vapor_core.py
+PYTHONPATH=python python3 python/tests/test_vapor_ui.py
+PYTHONPATH=python python3 python/tests/test_vapor_sdk.py
+VAPOR_DEMO_FRAMES=3 PYTHONPATH=python python3 python/examples/counter.py
+```
+
+Android 侧（不装 SDK 也能做，全部走 CI）：
+
+```bash
+./scripts/build_android_pyext.sh                 # 交叉编译双 ABI 的 _core/_ui/_sdk
+python3 scripts/install_to_cpython.py --home build/cpython/arm64 --abi arm64
+```
+
+`scripts/build_all.sh` 的第 6 步会自动执行上面两步，并把扩展按 ABI 放进 APK 的
+`assets/python/pyext/`，由 `RendererActivity` 按机型复制进 `site-packages`。
+
+内建预设组件（导入即注册，全部用底层 Canvas 画圆角/阴影/圆/进度弧）：
+
+```python
+import Vapor.presets           # 注册 <Card/> <Fab/> <Chip/> <Dialog/> <ProgressRing/> ...
+```
+
+按压反馈是通用的：手指按住任意组件时命中链上的节点都会收到 `press` 并把
+`node.pressed` 置真，抬起时收到 `release`；预设组件据此做高亮，自定义组件可以直接读
+`node.pressed` 或绑 `:on_press` / `:on_release` / `:on_hover`。
+
+**权限策略**：`AndroidManifest.xml` 一次性声明全部可能用到的权限（59 条，声明≠授予），
+危险权限只在真正调用对应 SDK 能力时由 `Vapor.sdk.Permissions.ensure(...)` 弹窗申请
+（`Location` / `Notifications` 等已内置懒申请）。
+
+组件扩展（ABI v1，模板生成 + 校验 + 热插拔）：
+
+```bash
+python -m Vapor.component MyCard              # 生成 lib/MyCard.py（含 manifest/register）
+python -m Vapor.component MyCard --kind c     # 生成 C 外壳骨架
+```
+
+组件本体是 `Vapor.ui.Component` 子类，提供者模块暴露 `ABI` / `manifest()` / `register(host)`；
+C 扩展导出 `vapor_component_init(VaporApi*)`，用 `dladdr` 定位自身目录后注册同目录的 Python
+组件包。契约与校验规则见 [docs/COMPONENT_ABI.md](docs/COMPONENT_ABI.md)。
+
+CI：`.github/workflows/ci.yml`（3 OS × Python 3.10/3.13 的 maturin 构建与测试、
+Android 双 ABI 交叉编译、tag 触发的 wheel 构建）、`.github/workflows/android.yml`
+（手动触发，可产出两个 APK）。完整设计见 [docs/REACTIVE.md](docs/REACTIVE.md)。
+

@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "name": "Vapor Showcase",
+  "version": "1.0.0",
+  "width": 360,
+  "height": 640,
+  "theme": "dark",
+  "permissions": {
+    "camera": "on_demand",
+    "location": "on_demand"
+  }
+}

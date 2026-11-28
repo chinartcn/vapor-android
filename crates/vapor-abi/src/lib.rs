@@ -31,6 +31,8 @@ pub const EVT_RESIZE: i32 = 4;
 pub const EVT_RESUME: i32 = 5;
 pub const EVT_PAUSE: i32 = 6;
 pub const EVT_DESTROY: i32 = 7;
+/// v1.2 追加：滚轮/触控板（x=水平量，y=垂直量，像素）。
+pub const EVT_WHEEL: i32 = 8;
 
 pub const LOG_VERBOSE: i32 = 2;
 pub const LOG_DEBUG: i32 = 3;

@@ -347,7 +347,7 @@ pub extern "C" fn vapor_api() -> *const VaporApi {
 #[allow(non_snake_case)]
 pub extern "C" fn Java_com_vapor_RendererActivity_nativeInit(
     env: *mut c_void,
-    _thiz: *mut c_void,
+    thiz: *mut c_void,
     surface: *mut c_void,
     w: i32,
     h: i32,
@@ -364,6 +364,12 @@ pub extern "C" fn Java_com_vapor_RendererActivity_nativeInit(
             jni::set_vm(vm);
         }
     }
+    // 1.5) 保存 Activity 句柄（全局引用）：Python 侧申请运行时权限要用它。
+    let activity = jni::register_object(env, thiz);
+    if activity != 0 {
+        ACTIVITY_HANDLE.store(activity, std::sync::atomic::Ordering::Relaxed);
+    }
+
     // 2) 从 Surface 取 ANativeWindow 并初始化 EGL/GLES
     unsafe {
         let window = android_native_window_from_surface(env, surface);
@@ -414,6 +420,139 @@ pub extern "C" fn Java_com_vapor_RendererActivity_nativeRender(_env: *mut c_void
 #[allow(non_snake_case)]
 pub extern "C" fn Java_com_vapor_RendererActivity_nativeShutdown(_env: *mut c_void, _thiz: *mut c_void) {
     vapor_shutdown();
+}
+
+/// Activity 的 JNI 句柄（nativeInit 时注册），供 Python 侧 requestPermissions 等使用。
+#[cfg(target_os = "android")]
+static ACTIVITY_HANDLE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// 权限申请结果：requestCode -> 1/0（poll 时取走）。
+#[cfg(target_os = "android")]
+fn permission_results() -> &'static std::sync::Mutex<std::collections::HashMap<i32, i32>> {
+    static RESULTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<i32, i32>>> =
+        std::sync::OnceLock::new();
+    RESULTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 取 Activity 句柄（0 表示不可用）。Python：rust.Vapor.activity()
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn vapor_activity() -> i64 {
+    ACTIVITY_HANDLE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 取一条权限申请结果：-1=仍在等待，0=拒绝，1=授予（取走后清除）。
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn vapor_permission_poll(code: i32) -> i32 {
+    permission_results()
+        .lock()
+        .ok()
+        .and_then(|mut map| map.remove(&code))
+        .unwrap_or(-1)
+}
+
+/// JNI 入口：Java onRequestPermissionsResult 回调。
+#[cfg(target_os = "android")]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn Java_com_vapor_RendererActivity_nativePermissionResult(
+    _env: *mut c_void,
+    _thiz: *mut c_void,
+    code: i32,
+    granted: i32,
+) {
+    if let Ok(mut map) = permission_results().lock() {
+        map.insert(code, granted);
+    }
+}
+
+#[cfg(target_os = "android")]
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// JNI 入口：Java 侧把 MotionEvent 归一化后转发进来。
+///
+/// action: 0=DOWN 1=UP 2=MOVE 3=CANCEL（多指时 Java 已按 actionIndex 取当前手指）。
+/// x2/y2 是第二根手指的坐标（单指时等于 x/y），keycode 字段复用为 pointer_count。
+/// 这些事件进入 Rust 的事件队列，Python 的 PointerRouter 每帧 poll 出来做手势识别。
+#[cfg(target_os = "android")]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn Java_com_vapor_RendererActivity_nativeTouch(
+    _env: *mut c_void,
+    _thiz: *mut c_void,
+    action: i32,
+    x: f32,
+    y: f32,
+    pointer_id: i32,
+    pointer_count: i32,
+    x2: f32,
+    y2: f32,
+) {
+    let (event_type, mapped) = match action {
+        0 => (EVT_BUTTON, 0), // down
+        1 => (EVT_BUTTON, 1), // up
+        2 => (EVT_MOTION, 2), // move
+        3 => (EVT_BUTTON, 3), // cancel
+        4 => (EVT_BUTTON, 4), // 第二根手指按下
+        5 => (EVT_BUTTON, 5), // 第二根手指抬起
+        _ => return,
+    };
+    push_event(VaporEvent {
+        event_type,
+        x: x as i32,
+        y: y as i32,
+        x2: x2 as i32,
+        y2: y2 as i32,
+        button: pointer_id,
+        action: mapped,
+        keycode: pointer_count,
+        timestamp_ms: now_ms(),
+    });
+}
+
+/// JNI 入口：滚轮 / 触控板（Android 的 ACTION_SCROLL）。
+/// x=水平滚动量、y=垂直滚动量（像素），走 EVT_WHEEL 事件。
+#[cfg(target_os = "android")]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn Java_com_vapor_RendererActivity_nativeWheel(
+    _env: *mut c_void,
+    _thiz: *mut c_void,
+    dx: f32,
+    dy: f32,
+) {
+    push_event(VaporEvent {
+        event_type: EVT_WHEEL,
+        x: dx as i32,
+        y: dy as i32,
+        timestamp_ms: now_ms(),
+        ..Default::default()
+    });
+}
+
+/// JNI 入口：按键（action: 0=down 1=up）。返回键 keycode=4，由 Python 决定是否处理。
+#[cfg(target_os = "android")]
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn Java_com_vapor_RendererActivity_nativeKey(
+    _env: *mut c_void,
+    _thiz: *mut c_void,
+    keycode: i32,
+    action: i32,
+) {
+    push_event(VaporEvent {
+        event_type: EVT_KEY,
+        keycode,
+        action,
+        timestamp_ms: now_ms(),
+        ..Default::default()
+    });
 }
 
 // ANativeWindow_fromSurface 属于 libandroid.so，必须显式链接。
