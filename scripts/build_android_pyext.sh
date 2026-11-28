@@ -37,12 +37,40 @@ export CARGO_TARGET_DIR="$ROOT/build/target-pyext"
 
 echo "===== PyO3 扩展交叉编译（arm64-v8a + armeabi-v7a, API $API） ====="
 rm -rf "$RAW"
-for crate in vapor-reactive vapor-ui vapor-sdk; do
-  echo "--- $crate ---"
-  cargo ndk --platform "$API" -t arm64-v8a -t armeabi-v7a -o "$RAW" \
-      build --release --features pyo3/extension-module \
-      --manifest-path "rust/$crate/Cargo.toml"
-done
+
+# 显式 pyo3 配置：abi3 + 不链接 libpython（Android 上由宿主 dlopen 提供符号）。
+# 不这么做时会去找 -lpython3.15，交叉编译环境里并不存在。
+write_pyo3_config() {
+  local abi="$1" pw="$2" file="$OUT/pyo3-$abi.txt"
+  cat > "$file" <<EOF
+implementation=CPython
+version=3.10
+shared=false
+abi3=true
+lib_name=python3.15
+lib_dir=
+executable=
+pointer_width=$pw
+build_flags=
+suppress_build_script_link_lines=true
+EOF
+  echo "$file"
+}
+
+build_for() {
+  local abi="$1" pw="$2"
+  local cfg; cfg="$(write_pyo3_config "$abi" "$pw")"
+  for crate in vapor-reactive vapor-ui vapor-sdk; do
+    echo "--- $crate ($abi)"
+    PYO3_CONFIG_FILE="$cfg" \
+      cargo ndk --platform "$API" -t "$abi" -o "$RAW" \
+        build --release --features pyo3/extension-module \
+        --manifest-path "rust/$crate/Cargo.toml"
+  done
+}
+
+build_for arm64-v8a 64
+build_for armeabi-v7a 32
 
 for abi in arm64-v8a armeabi-v7a; do
   dst="$OUT/$abi/Vapor"

@@ -12,7 +12,11 @@ from __future__ import annotations
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 已安装（wheel / maturin develop）时优先用安装版，避免源码目录遮蔽原生扩展
+try:
+    import Vapor  # noqa: F401
+except ImportError:
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from Vapor import ui as V  # noqa: E402
 

@@ -46,7 +46,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Windows 上 maturin-action 探测 python3 会碰到 WindowsApps 存根（EACCES），
+        # 原生 wheel 不在本项目交付范围内；Windows 仍由 fallback job 覆盖。
+        os: [ubuntu-latest, macos-latest]
         python: ["3.10", "3.13"]
     steps:
       - uses: actions/checkout@v4
