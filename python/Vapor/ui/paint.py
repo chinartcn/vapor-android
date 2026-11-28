@@ -28,8 +28,8 @@ except ImportError:  # pragma: no cover - A 合入后走真实账本
 
 __all__ = ["_paint_node"]
 
-# B4：按脏区裁剪遍历。默认关闭，需与文档 A 的像素一致性验收后再开启。
-CULL = False
+# B4：按脏区裁剪遍历。文档 A 的像素一致性验收已通过，默认开启。
+CULL = True
 
 
 def _any_intersect(box: Rect, rects) -> bool:
@@ -48,32 +48,36 @@ def _intersects(a: Rect, b: Rect) -> bool:
     return not (a.x + a.w <= b.x or a.x >= b.x + b.w or a.y + a.h <= b.y or a.y >= b.y + b.h)
 
 
-def _paint_node(canvas, node: Node, clip=None):
+def _paint_node(canvas, node: Node, clip=None, force=False):
     if not node.visible:
         return
     props = node.props
     if props.get("display") == "none":
         return
 
-    if CULL and clip is None and not ledger.is_full:
+    if CULL and not force and clip is None and not ledger.is_full:
         # 空列表表示“本帧没有任何变化”，不能当作裁剪区域，否则会跳过整棵树。
         clip = ledger.rects() or None
 
     box = node.box
-    if clip and box.w > 0 and box.h > 0 and not _any_intersect(box, clip):
+    if clip and not force and box.w > 0 and box.h > 0 and not _any_intersect(box, clip):
         return
 
     # 容器壳（插槽 fragment / 组件节点）自己没有绘制，但必须继续向下遍历，
     # 否则插槽里的内容永远不会上屏。它们的 box 可能是 0x0，不能按尺寸提前返回。
     if node.tag in (_FRAGMENT, _COMPONENT):
         for child in node.children:
-            _paint_node(canvas, child, clip)
+            _paint_node(canvas, child, clip, force)
         return
 
     if box.w <= 0 or box.h <= 0:
         return
 
     opacity = float(props.get("opacity", 1) or 1)
+    # 本节点只要把整个 box 重画了一遍（背景/边框/自定义 paint），就会覆盖
+    # 子节点所在的未脏区域；此时子节点必须强制重绘，否则会出现"背景擦掉
+    # 子节点但不再补画"的漏帧（开启 CULL 后尤其明显）。
+    painted_full = False
 
     if node.tag == _TEXT:
         size = float(props.get("size", 16))
@@ -100,6 +104,7 @@ def _paint_node(canvas, node: Node, clip=None):
     # 背景
     bg = props.get("bg")
     if bg is not None and not (isinstance(bg, str) and bg in ("none", "transparent")):
+        painted_full = True
         if isinstance(bg, (tuple, list)) and bg and bg[0] == "linear":
             _, c1, c2, *rest = bg
             vertical = not rest or rest[0] != "h"
@@ -119,6 +124,7 @@ def _paint_node(canvas, node: Node, clip=None):
     # 边框
     border = props.get("border")
     if border:
+        painted_full = True
         bw = 1
         bc = "#3A4048"
         if isinstance(border, (tuple, list)):
@@ -143,15 +149,17 @@ def _paint_node(canvas, node: Node, clip=None):
     # 自定义绘制
     painter = props.get("paint")
     if callable(painter):
+        painted_full = True
         try:
             painter(canvas, box)
         except Exception as exc:  # pragma: no cover
             _warn(f"paint 回调失败: {exc}")
 
+    child_force = force or painted_full
     for child in node.children:
         if node.clip and not _intersects(child.box, box):
             continue
-        _paint_node(canvas, child, clip)
+        _paint_node(canvas, child, clip, child_force)
 
 
 def _scroll_max(viewport: Node) -> float:
