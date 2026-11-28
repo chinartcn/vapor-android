@@ -36,12 +36,13 @@ export PYO3_BUILD_EXTENSION_MODULE=1
 export CARGO_TARGET_DIR="$ROOT/build/target-pyext"
 
 echo "===== PyO3 扩展交叉编译（arm64-v8a + armeabi-v7a, API $API） ====="
-rm -rf "$RAW"
+mkdir -p "$OUT" "$RAW"
 
 # 显式 pyo3 配置：abi3 + 不链接 libpython（Android 上由宿主 dlopen 提供符号）。
 # 不这么做时会去找 -lpython3.15，交叉编译环境里并不存在。
 write_pyo3_config() {
   local abi="$1" pw="$2" file="$OUT/pyo3-$abi.txt"
+  mkdir -p "$OUT"
   cat > "$file" <<EOF
 implementation=CPython
 version=3.10
