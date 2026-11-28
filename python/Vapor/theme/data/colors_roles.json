@@ -1,0 +1,51 @@
+{
+  "_note": "MD3 色彩角色清单（taxonomy only，不是官方死色值）。值请从 Material Theme Builder 导出，见 static_schemes.py。",
+  "source": "05-Design-Tokens/colors.json",
+  "checked_on": "2026-11-16",
+  "verified": "taxonomy_only",
+  "groups": {
+    "primary": ["primary", "onPrimary", "primaryContainer", "onPrimaryContainer"],
+    "secondary": ["secondary", "onSecondary", "secondaryContainer", "onSecondaryContainer"],
+    "tertiary": ["tertiary", "onTertiary", "tertiaryContainer", "onTertiaryContainer"],
+    "error": ["error", "onError", "errorContainer", "onErrorContainer"],
+    "surface": [
+      "surface",
+      "onSurface",
+      "onSurfaceVariant",
+      "surfaceContainerLowest",
+      "surfaceContainerLow",
+      "surfaceContainer",
+      "surfaceContainerHigh",
+      "surfaceContainerHighest"
+    ],
+    "outline": ["outline", "outlineVariant"]
+  },
+  "add_on": {
+    "fixed_accents": [
+      "primaryFixed",
+      "primaryFixedDim",
+      "onPrimaryFixed",
+      "onPrimaryFixedVariant",
+      "secondaryFixed",
+      "secondaryFixedDim",
+      "onSecondaryFixed",
+      "onSecondaryFixedVariant",
+      "tertiaryFixed",
+      "tertiaryFixedDim",
+      "onTertiaryFixed",
+      "onTertiaryFixedVariant"
+    ],
+    "surface": ["surfaceDim", "surfaceBright"],
+    "inverse": ["inverseSurface", "inverseOnSurface", "inversePrimary"]
+  },
+  "functional": ["scrim"],
+  "deprecated": ["background", "onBackground"],
+  "contrast": {
+    "small_text": "4.5:1",
+    "large_text_and_graphics": "3:1",
+    "container_vs_background": "3:1",
+    "disabled": "not required",
+    "fab_container_vs_background": "not required",
+    "note": "只有 on* 与父色的配对是保证足够的"
+  }
+}

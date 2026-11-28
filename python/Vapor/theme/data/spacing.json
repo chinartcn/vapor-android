@@ -1,0 +1,16 @@
+{
+  "_note": "MD3 间距基线：4dp 网格。",
+  "source": "01-Foundations/spacing.md",
+  "checked_on": "2026-11-15",
+  "verified": true,
+  "grid": 4,
+  "unit": "dp",
+  "spacing": {
+    "xs": 4,
+    "s": 8,
+    "m": 12,
+    "l": 16,
+    "xl": 24,
+    "xxl": 32
+  }
+}

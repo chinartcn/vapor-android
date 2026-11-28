@@ -1,0 +1,28 @@
+{
+  "_note": "MD3 形状十档；full 按容器最短边的一半计算，不是固定 dp。",
+  "source": "05-Design-Tokens/shapes.json",
+  "checked_on": "2026-11-15",
+  "verified": true,
+  "unit": "dp",
+  "shapes": {
+    "none": 0,
+    "extraSmall": 4,
+    "small": 8,
+    "medium": 12,
+    "large": 16,
+    "largeIncreased": 20,
+    "extraLarge": 28,
+    "extraLargeIncreased": 32,
+    "extraExtraLarge": 48,
+    "full": "shortest-side / 2"
+  },
+  "component_defaults": {
+    "button": "full",
+    "chip": 8,
+    "dialog": 28,
+    "card": 12,
+    "button_pressed": [8, 8, 12, 16, 16],
+    "button_square_expressive": [12, 12, 16, 28, 28]
+  },
+  "note": "Compose 只有 extraSmall/small/medium/large/extraLarge 五槽，其余由上层按需计算；card=12 为通行值，未从 Specs 页逐条确认。"
+}

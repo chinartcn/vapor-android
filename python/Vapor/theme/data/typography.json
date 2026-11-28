@@ -1,0 +1,56 @@
+{
+  "_note": "MD3 字阶 30 档（15 baseline + 15 emphasized）。单位 sp。emphasized 只改字重，不改字号。",
+  "source": "05-Design-Tokens/typography.json",
+  "checked_on": "2026-11-22",
+  "compose_verified_on": "2026-11-22",
+  "verified": true,
+  "unit": "sp",
+  "styles": {
+    "displayLarge":   {"fontSize": 57, "lineHeight": 64, "fontWeight": 400, "letterSpacing": -0.25},
+    "displayMedium":  {"fontSize": 45, "lineHeight": 52, "fontWeight": 400, "letterSpacing": 0},
+    "displaySmall":   {"fontSize": 36, "lineHeight": 44, "fontWeight": 400, "letterSpacing": 0},
+    "headlineLarge":  {"fontSize": 32, "lineHeight": 40, "fontWeight": 400, "letterSpacing": 0},
+    "headlineMedium": {"fontSize": 28, "lineHeight": 36, "fontWeight": 400, "letterSpacing": 0},
+    "headlineSmall":  {"fontSize": 24, "lineHeight": 32, "fontWeight": 400, "letterSpacing": 0},
+    "titleLarge":     {"fontSize": 22, "lineHeight": 28, "fontWeight": 400, "letterSpacing": 0},
+    "titleMedium":    {"fontSize": 16, "lineHeight": 24, "fontWeight": 500, "letterSpacing": 0.15},
+    "titleSmall":     {"fontSize": 14, "lineHeight": 20, "fontWeight": 500, "letterSpacing": 0.1},
+    "bodyLarge":      {"fontSize": 16, "lineHeight": 24, "fontWeight": 400, "letterSpacing": 0.5},
+    "bodyMedium":     {"fontSize": 14, "lineHeight": 20, "fontWeight": 400, "letterSpacing": 0.25},
+    "bodySmall":      {"fontSize": 12, "lineHeight": 16, "fontWeight": 400, "letterSpacing": 0.4},
+    "labelLarge":     {"fontSize": 14, "lineHeight": 20, "fontWeight": 500, "letterSpacing": 0.1},
+    "labelMedium":    {"fontSize": 12, "lineHeight": 16, "fontWeight": 500, "letterSpacing": 0.5},
+    "labelSmall":     {"fontSize": 11, "lineHeight": 16, "fontWeight": 500, "letterSpacing": 0.5}
+  },
+  "emphasized": {
+    "displayLargeEmphasized":   {"fontSize": 57, "lineHeight": 64, "fontWeight": 500, "letterSpacing": -0.25},
+    "displayMediumEmphasized":  {"fontSize": 45, "lineHeight": 52, "fontWeight": 500, "letterSpacing": 0},
+    "displaySmallEmphasized":   {"fontSize": 36, "lineHeight": 44, "fontWeight": 500, "letterSpacing": 0},
+    "headlineLargeEmphasized":  {"fontSize": 32, "lineHeight": 40, "fontWeight": 500, "letterSpacing": 0},
+    "headlineMediumEmphasized": {"fontSize": 28, "lineHeight": 36, "fontWeight": 500, "letterSpacing": 0},
+    "headlineSmallEmphasized":  {"fontSize": 24, "lineHeight": 32, "fontWeight": 500, "letterSpacing": 0},
+    "titleLargeEmphasized":     {"fontSize": 22, "lineHeight": 28, "fontWeight": 500, "letterSpacing": 0},
+    "titleMediumEmphasized":    {"fontSize": 16, "lineHeight": 24, "fontWeight": 700, "letterSpacing": 0.15},
+    "titleSmallEmphasized":     {"fontSize": 14, "lineHeight": 20, "fontWeight": 700, "letterSpacing": 0.1},
+    "bodyLargeEmphasized":      {"fontSize": 16, "lineHeight": 24, "fontWeight": 500, "letterSpacing": 0.5},
+    "bodyMediumEmphasized":     {"fontSize": 14, "lineHeight": 20, "fontWeight": 500, "letterSpacing": 0.25},
+    "bodySmallEmphasized":      {"fontSize": 12, "lineHeight": 16, "fontWeight": 500, "letterSpacing": 0.4},
+    "labelLargeEmphasized":     {"fontSize": 14, "lineHeight": 20, "fontWeight": 700, "letterSpacing": 0.1},
+    "labelMediumEmphasized":    {"fontSize": 12, "lineHeight": 16, "fontWeight": 700, "letterSpacing": 0.5},
+    "labelSmallEmphasized":     {"fontSize": 11, "lineHeight": 16, "fontWeight": 700, "letterSpacing": 0.5}
+  },
+  "compose_values": {
+    "baseline": {
+      "titleMedium": {"letterSpacing": 0.2},
+      "bodyMedium": {"letterSpacing": 0.2}
+    },
+    "note": "material3 1.5.0 sources jar 逐档核验；官网与 Compose 在 titleMedium/bodyMedium 的 tracking 上并存两套，不互相覆盖。"
+  },
+  "language_height": {
+    "small": 1.0,
+    "medium": 1.07,
+    "large": 1.3,
+    "extraLarge": 2.0,
+    "note": "中日韩/阿拉伯/印度系等使用 medium(1.07)；固定高度组件不自动适配行高变化。"
+  }
+}
